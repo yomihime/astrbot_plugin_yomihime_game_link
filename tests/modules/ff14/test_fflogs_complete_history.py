@@ -45,7 +45,7 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
     requested = explicit_fixture.ExplicitHistoryTests.requested
     planned_packs = explicit_fixture.ExplicitHistoryTests.planned_packs
 
-    async def test_optional_menu_state_precedes_history_and_reports_cache_hit(self):
+    async def test_optional_menu_overlaps_history_and_reports_cache_hit(self):
         from tests.modules.ff14.test_duty_order import payload
 
         events = []
@@ -54,20 +54,22 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
         )
         original = self.scope.http.fetch
         menu_calls = []
+        history_started = asyncio.Event()
 
         async def fetch(request):
             if request.source_id == "xivapi_items":
-                self.assertEqual(self.calls, [])
-                self.assertEqual(self.operations["lookup"], 0)
+                async with asyncio.timeout(1):
+                    await history_started.wait()
                 menu_calls.append(request)
                 return SimpleNamespace(status_code=200, body=payload())
+            history_started.set()
             return await original(request)
 
         self.scope.http.fetch = fetch
         first = await self.collect(evidence)
         second = await self.collect(evidence)
         states = [event for event in events if event[0] == "FF14DutyOrderState"]
-        self.assertEqual(events[0][0], "FF14DutyOrderState")
+        self.assertEqual(events[-1][0], "FF14HistorySummary")
         self.assertEqual([event[2]["cached"] for event in states], [False, True])
         self.assertTrue(all(event[1]["complete"] for event in states))
         self.assertEqual(len(menu_calls), 1)

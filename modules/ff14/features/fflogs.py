@@ -6,11 +6,13 @@ import asyncio
 import json
 import math
 import re
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 from decimal import Decimal
 from html.parser import HTMLParser
 from time import monotonic, time
 from urllib.parse import quote
+from weakref import WeakValueDictionary
 
 from ....yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
 from ....yomihime_game_link_sdk.display import (
@@ -58,8 +60,10 @@ from .fflogs_catalog import (
     FFLOGS_CN_SOURCE,
     FFLOGS_GLOBAL_SOURCE,
     GRAPHQL_PATH,
+    MAX_SERVER_PAGES,
     FFLogsCatalog,
     FFLogsGraphQLError,
+    match_servers,
     normalized_encounter_name,
     parse_graphql_envelope,
     resolve_output_metadata,
@@ -144,6 +148,9 @@ class FFLogsCharacterLookup:
         self._lifecycle = object()
         self._metadata_cache: dict[str, tuple[float, OutputMetadata | None, str]] = {}
         self._ranking_contract_cache = {}
+        self._server_cache = {}
+        # Only active callers retain locks. No invocation port or task is shared.
+        self._refresh_locks = WeakValueDictionary()
         from .duty_order import DutyOrderCatalog
 
         self._duty_order = DutyOrderCatalog()
@@ -154,9 +161,59 @@ class FFLogsCharacterLookup:
     def close(self) -> None:
         self._lifecycle = object()
         self._metadata_cache.clear()
+        self._server_cache.clear()
+        self._refresh_locks.clear()
         self._ranking_contract_cache.clear()
         self._duty_order.close()
         self._chat_pending.close()
+
+    @asynccontextmanager
+    async def _refresh(self, key, deadline):
+        """Wait within the caller's own budget; never borrow another caller's ports."""
+        lock = self._refresh_locks.setdefault(key, asyncio.Lock())
+        try:
+            async with asyncio.timeout(max(0, deadline - monotonic())):
+                await lock.acquire()
+        except TimeoutError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            lock.release()
+
+    async def _resolve_server(
+        self, scope, realm, source_id, label, page_budget, lifecycle, metrics
+    ):
+        def active():
+            if self._lifecycle is not lifecycle:
+                raise ServiceUnavailable()
+
+        catalog = FFLogsCatalog(scope.http, source_id, check_active=active)
+        if scope.check_source is None:
+            # A fetch-only source cannot independently revalidate a cached read.
+            return await catalog.resolve_server(realm, label, page_budget=page_budget)
+        key = (source_id, realm, page_budget)
+        async with self._refresh_locks.setdefault(key, asyncio.Lock()):
+            active()
+            cached = self._server_cache.get(key)
+            hit = cached is not None and cached[0] > monotonic()
+            if metrics is not None:
+                for op in ("FF14WorldRegions", "FF14WorldServers"):
+                    metrics.cache(op, hit)
+            if hit:
+                await scope.check_source(source_id)
+                active()
+                directory = cached[1]
+            else:
+                directory = await catalog.load_servers(realm, page_budget=page_budget)
+                active()
+                if directory.complete:
+                    self._server_cache[key] = (
+                        monotonic() + METADATA_CACHE_SECONDS,
+                        directory,
+                    )
+            return match_servers(directory, label)
 
     async def _character_metadata(
         self,
@@ -225,7 +282,17 @@ class FFLogsCharacterLookup:
         except SourceHttpError as exc:
             if exc.code == "cancelled":
                 raise
-            state = "unavailable_source"
+            state = (
+                "unavailable_permission"
+                if exc.code
+                in {
+                    "request_rejected",
+                    "credentials_unavailable",
+                    "source_not_declared",
+                }
+                or exc.status_code in {401, 403}
+                else "unavailable_source"
+            )
             if failures is not None:
                 failures.source_error(exc)
         except FFLogsGraphQLError:
@@ -257,7 +324,12 @@ class FFLogsCharacterLookup:
             if metadata is not None
             else METADATA_FAILURE_CACHE_SECONDS
         )
-        self._metadata_cache[source_id] = (monotonic() + ttl, metadata, state)
+        if state not in {
+            "unavailable_permission",
+            "unavailable_service",
+            "unavailable_timeout",
+        }:
+            self._metadata_cache[source_id] = (monotonic() + ttl, metadata, state)
         if evidence is not None:
             evidence.observe("FF14MetadataState", {"state": state}, status=None)
         return metadata
@@ -278,21 +350,71 @@ class FFLogsCharacterLookup:
         budget=None,
         failures=None,
     ):
+        from .fflogs_history_cache import history_identity
+
+        started = monotonic()
+        stop_at = deadline if deadline is not None else started + 30
+        identity = history_identity(
+            source_id, character, identity_variables, metadata, cache_owner
+        )
+        targets = _catalog_query_targets(
+            select_character_zones(metadata, character.zone_id)
+        )
+        lock = (
+            self._refresh(
+                ("history", identity, character.zone_id, character.metric), stop_at
+            )
+            if getattr(scope, "cache", None) is not None
+            else nullcontext(True)
+        )
+        async with lock as acquired:
+            if self._lifecycle is not lifecycle:
+                raise ServiceUnavailable()
+            if not acquired:
+                # The caller's history budget expired in the queue. No storage
+                # or upstream work may start without this caller owning the lock.
+                return _assemble_catalog_rankings(character, metadata, targets, {})
+            return await self._ranking_plan(
+                scope,
+                source_id,
+                character,
+                metadata,
+                identity_variables,
+                lifecycle,
+                evidence,
+                stop_at,
+                targets,
+                identity,
+                started,
+                budget,
+                failures,
+            )
+
+    async def _ranking_plan(
+        self,
+        scope,
+        source_id,
+        character,
+        metadata,
+        identity_variables,
+        lifecycle,
+        evidence,
+        stop_at,
+        targets,
+        identity,
+        started,
+        budget,
+        failures,
+    ):
         from .fflogs_history_cache import (
             HISTORY_CACHE_TTL,
             cache_pack_key,
             cache_packs,
-            history_identity,
             pack_payload,
             restore_pack,
             snapshot_payload,
         )
 
-        started = monotonic()
-        stop_at = deadline if deadline is not None else started + 30
-        targets = _catalog_query_targets(
-            select_character_zones(metadata, character.zone_id)
-        )
         all_ordered = _bounded_catalog_targets(targets)
         keys = tuple(
             dict.fromkeys(
@@ -304,9 +426,6 @@ class FFLogsCharacterLookup:
             for target in targets
             if target[3] is not None
         }
-        identity = history_identity(
-            source_id, character, identity_variables, metadata, cache_owner
-        )
         cache = getattr(scope, "cache", None)
         packs = cache_packs(metadata, tuple(key for key in keys if key in eligible))
         cached, dates, loaded = {}, {}, {}
@@ -323,24 +442,29 @@ class FFLogsCharacterLookup:
                 raise ServiceUnavailable()
 
         # Cache recovery and authority remain owned by Core.
-        duty_order = None
-        if any(target[2] == "ultimate" for target in targets):
-            duty_order = await self._duty_order.load(
-                scope.http,
-                deadline=stop_at,
-                evidence=evidence,
-                names=tuple(
-                    {
-                        ultimate_group_key(
-                            zone.name, encounter.name
-                        ): ultimate_group_name(zone.name, encounter.name)
-                        for zone, _, category, _ in targets
-                        if category == "ultimate"
-                        for encounter in zone.encounters
-                    }.values()
-                ),
-            )
-            active()
+        async def order():
+            if not any(target[2] == "ultimate" for target in targets):
+                return None
+            async with self._refresh(("duty_order",), stop_at) as acquired:
+                active()
+                if not acquired:
+                    return None
+                return await self._duty_order.load(
+                    scope.http,
+                    check_source=getattr(scope, "check_source", None),
+                    deadline=stop_at,
+                    evidence=evidence,
+                    names=tuple(
+                        {
+                            ultimate_group_key(
+                                zone.name, encounter.name
+                            ): ultimate_group_name(zone.name, encounter.name)
+                            for zone, _, category, _ in targets
+                            if category == "ultimate"
+                            for encounter in zone.encounters
+                        }.values()
+                    ),
+                )
 
         available = max(0, stop_at - monotonic())
         write_reserve = min(2, available * 0.1) if cache is not None else 0
@@ -396,7 +520,7 @@ class FFLogsCharacterLookup:
         summary["read_ms"] = max(0, int((monotonic() - read_started) * 1000))
         pairs = tuple(key for key in keys if key in eligible and key not in cached)
         fetch_started = monotonic()
-        await self._fetch_catalog_rankings(
+        history = self._fetch_catalog_rankings(
             scope,
             source_id,
             character,
@@ -413,6 +537,16 @@ class FFLogsCharacterLookup:
             summary=summary,
             failures=failures,
         )
+        # Menu sorting and FFLogs history use separate sources and no shared inputs
+        # beyond the verified catalog. Join both before assembling or saving rows.
+        tasks = [asyncio.create_task(order()), asyncio.create_task(history)]
+        try:
+            duty_order, _ = await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         summary["fetch_ms"] = max(0, int((monotonic() - fetch_started) * 1000))
         active()
         if any(value == "hidden" for value in fresh.values()):
@@ -800,7 +934,12 @@ class FFLogsCharacterLookup:
             return await invoke_character_tool(self, context, parameters, failures)
         from .fflogs_evidence import RequestMetrics
 
-        metrics = RequestMetrics() if explicit_command else None
+        metrics = (
+            RequestMetrics()
+            if explicit_command
+            or getattr(context, "origin", None) is InvocationOrigin.WEB_PUBLIC
+            else None
+        )
         observation = None
         if (
             context is not None
@@ -810,7 +949,6 @@ class FFLogsCharacterLookup:
         ):
             from .fflogs_scope_contract import InvocationObservation
 
-            metrics = RequestMetrics()
             observation = InvocationObservation(parameters, metrics)
         started = monotonic()
         stop_at = getattr(context, "deadline", None)
@@ -850,10 +988,17 @@ class FFLogsCharacterLookup:
             if observation is not None:
                 observation.reject("deadline")
                 result = observation.attach(result)
-        if metrics is not None:
-            metrics.finish()
-            if metrics.evidence is not None:
-                await metrics.evidence.flush()
+        if metrics is not None and metrics.evidence is not None:
+            failures.end_stage()
+            diagnostics_started = monotonic()
+            await metrics.evidence.flush()
+            metrics.finish(
+                outcome=result.status.value,
+                stages=failures.stage_ms,
+                diagnostic_ms=metrics.evidence.projection_ms
+                + int((monotonic() - diagnostics_started) * 1000),
+            )
+            await metrics.evidence.flush()
         return result
 
     async def _execute(
@@ -895,6 +1040,7 @@ class FFLogsCharacterLookup:
 
         if scope is None:
             scope = await self._services.scopes.bind(context)
+        check_source = getattr(scope.http, "budget", None)
         observed_http = scope.http
         if failures is not None:
             if failures.port is None:
@@ -907,6 +1053,7 @@ class FFLogsCharacterLookup:
             http=observation.wrap(observed_http)
             if observation is not None
             else observed_http,
+            check_source=check_source,
             cache=getattr(scope, "cache", None),
             records=getattr(scope, "records", None),
         )
@@ -962,7 +1109,9 @@ class FFLogsCharacterLookup:
             else None
         )
         if metrics is not None:
-            metrics.evidence = evidence
+            metrics.evidence = evidence or Evidence(source_id, metrics.diagnostics)
+        if failures is not None:
+            failures.begin(source_id, "authentication")
         credential_state = await _credential_state(self._services, realm)
 
         def stage_error(code, default):
@@ -1048,15 +1197,14 @@ class FFLogsCharacterLookup:
                     failures.begin(source_id, "server_directory")
                 if observation is not None:
                     observation.stage = "server-directory"
-                catalog = FFLogsCatalog(scope.http, source_id)
-                resolution = await catalog.resolve_server(
+                resolution = await self._resolve_server(
+                    scope,
                     realm,
+                    source_id,
                     server_label,
-                    **(
-                        {"page_budget": 4}
-                        if capture_evidence or advanced_filters
-                        else {}
-                    ),
+                    4 if capture_evidence or advanced_filters else MAX_SERVER_PAGES,
+                    lifecycle,
+                    metrics,
                 )
             else:
                 from types import SimpleNamespace
@@ -1346,15 +1494,34 @@ class FFLogsCharacterLookup:
             try:
                 if failures is not None:
                     failures.begin(source_id, "ranking_metadata")
-                metadata = await self._character_metadata(
-                    scope,
-                    source_id,
-                    lifecycle,
-                    evidence,
-                    deadline=deadline,
-                    metrics=metrics,
-                    failures=failures,
+                metadata_stop = min(
+                    deadline if deadline is not None else float("inf"),
+                    monotonic() + METADATA_DEADLINE_SECONDS,
                 )
+                async with self._refresh(
+                    ("metadata", source_id), metadata_stop
+                ) as acquired:
+                    if self._lifecycle is not lifecycle:
+                        raise ServiceUnavailable()
+                    if acquired:
+                        if (
+                            check_source is not None
+                            and source_id in self._metadata_cache
+                        ):
+                            await check_source(source_id)
+                            if self._lifecycle is not lifecycle:
+                                raise ServiceUnavailable()
+                        metadata = await self._character_metadata(
+                            scope,
+                            source_id,
+                            lifecycle,
+                            evidence,
+                            deadline=metadata_stop,
+                            metrics=metrics,
+                            failures=failures,
+                        )
+                    elif failures is not None:
+                        failures.source_error(TimeoutError())
                 if metadata is not None and metadata.character_catalog_verified:
                     if failures is not None:
                         failures.begin(source_id, "ranking_history")
@@ -1380,6 +1547,8 @@ class FFLogsCharacterLookup:
                 return stage_error(
                     ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。"
                 )
+        if failures is not None:
+            failures.end_stage()
         if observation is not None:
             observation.stage = "result"
         result = _character_result(

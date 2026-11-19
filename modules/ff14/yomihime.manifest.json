@@ -2934,7 +2934,50 @@
                   "module_source_http_fetch"
                 ]
               },
+              "s7": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "s6": {
+                "type": "object",
+                "properties": {
+                  "realm_directory": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "authentication": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "server_directory": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "character_query": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "ranking_schema": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "ranking_metadata": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "ranking_history": {
+                    "$ref": "#/$defs/s7"
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
               "s8": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "success",
+                  "partial_success",
+                  "error",
+                  "unknown"
+                ]
+              },
+              "s11": {
                 "type": "string",
                 "maxLength": 160,
                 "enum": [
@@ -2951,12 +2994,7 @@
                   "FF14CatalogCharacter"
                 ]
               },
-              "s9": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 2147483647
-              },
-              "s10": {
+              "s12": {
                 "type": "string",
                 "maxLength": 160,
                 "enum": [
@@ -2965,29 +3003,29 @@
                   "unknown"
                 ]
               },
-              "s7": {
+              "s10": {
                 "type": "object",
                 "properties": {
                   "operation": {
-                    "$ref": "#/$defs/s8"
+                    "$ref": "#/$defs/s11"
                   },
                   "attempts": {
-                    "$ref": "#/$defs/s9"
+                    "$ref": "#/$defs/s7"
                   },
                   "returned": {
-                    "$ref": "#/$defs/s9"
+                    "$ref": "#/$defs/s7"
                   },
                   "failed": {
-                    "$ref": "#/$defs/s9"
+                    "$ref": "#/$defs/s7"
                   },
                   "cancelled": {
-                    "$ref": "#/$defs/s9"
+                    "$ref": "#/$defs/s7"
                   },
                   "elapsed_ms": {
-                    "$ref": "#/$defs/s9"
+                    "$ref": "#/$defs/s7"
                   },
                   "cache": {
-                    "$ref": "#/$defs/s10"
+                    "$ref": "#/$defs/s12"
                   }
                 },
                 "required": [
@@ -3001,21 +3039,21 @@
                 ],
                 "additionalProperties": false
               },
-              "s6": {
+              "s9": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/s7"
+                  "$ref": "#/$defs/s10"
                 },
                 "maxItems": 11
               },
-              "s11": {
+              "s13": {
                 "type": "string",
                 "maxLength": 160,
                 "enum": [
                   "unknown"
                 ]
               },
-              "s12": {
+              "s14": {
                 "type": "string",
                 "maxLength": 160,
                 "enum": [
@@ -3028,24 +3066,40 @@
                   "kind": {
                     "$ref": "#/$defs/s5"
                   },
-                  "operations": {
+                  "stage_ms": {
                     "$ref": "#/$defs/s6"
                   },
-                  "elapsed_ms": {
+                  "cumulative_http_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "diagnostic_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "outcome": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "operations": {
                     "$ref": "#/$defs/s9"
                   },
+                  "elapsed_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
                   "underlying_http_cache": {
-                    "$ref": "#/$defs/s11"
+                    "$ref": "#/$defs/s13"
                   },
                   "host_oauth": {
-                    "$ref": "#/$defs/s12"
+                    "$ref": "#/$defs/s14"
                   },
                   "network_attempts": {
-                    "$ref": "#/$defs/s11"
+                    "$ref": "#/$defs/s13"
                   }
                 },
                 "required": [
                   "kind",
+                  "stage_ms",
+                  "cumulative_http_ms",
+                  "diagnostic_ms",
+                  "outcome",
                   "operations",
                   "elapsed_ms",
                   "underlying_http_cache",

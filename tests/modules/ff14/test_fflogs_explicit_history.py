@@ -517,12 +517,70 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.cache = self.contract._cache(self.owner)
         self.assertEqual((await self.run_history()).history_cache_hits, 0)
 
-    async def test_same_role_calls_have_no_rotation_or_cross_request_lock(self):
+    async def test_same_role_calls_refresh_once_and_recheck_own_cache(self):
         results = await asyncio.gather(self.run_history(), self.run_history())
         self.assertTrue(all(result.catalog_complete for result in results))
         requested = self.requested(self.calls)
-        self.assertEqual(len(requested), 222)
+        self.assertEqual(len(requested), 111)
+        self.assertEqual(
+            sorted(result.history_cache_hits for result in results), [0, 111]
+        )
+        self.assertEqual(results[0].groups, results[1].groups)
         self.assertEqual(len(set(requested)), 111)
+
+    async def test_other_metric_starts_while_first_refresh_is_blocked(self):
+        first_started = asyncio.Event()
+        second_started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fetch(request):
+            body = json.loads(request.body)
+            metric = body["variables"].get("metric")
+            (second_started if metric == "ndps" else first_started).set()
+            await release.wait()
+            return await self.fetch(request)
+
+        self.scope.http.fetch = fetch
+        owner = asyncio.create_task(self.run_history())
+        other = None
+        try:
+            async with asyncio.timeout(3):
+                await first_started.wait()
+                other = asyncio.create_task(
+                    self.handler._catalog_rankings(
+                        self.scope,
+                        self.source,
+                        replace(self.role, metric="ndps"),
+                        self.metadata,
+                        dict(VARIABLES, metric="ndps"),
+                        self.handler._lifecycle,
+                        cache_owner=self.owner,
+                    )
+                )
+                await second_started.wait()
+        finally:
+            release.set()
+            tasks = [task for task in (owner, other) if task is not None]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def test_short_waiter_preserves_partial_result_and_owner_keeps_running(self):
+        self.pause = asyncio.Event()
+        owner = asyncio.create_task(self.run_history())
+        try:
+            async with asyncio.timeout(2):
+                while not self.calls:
+                    await asyncio.sleep(0.001)
+            waiter = await self.run_history(deadline=monotonic() + 0.03)
+            self.assertFalse(waiter.catalog_complete)
+            self.assertEqual(waiter.history_cache_hits, 0)
+            self.assertFalse(owner.done())
+        finally:
+            self.pause.set()
+            result = await owner
+        self.assertTrue(result.catalog_complete)
+        self.assertEqual(len(self.requested(self.calls)), 111)
 
     async def test_revoked_invocation_cache_is_not_a_miss(self):
         self.contract.issuer.release(self.owner)

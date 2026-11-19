@@ -19,6 +19,7 @@ from ygl_test_subject.infrastructure.sync_diagnostics import (
     MAX_EVENTS,
     SyncDiagnostics,
     emit,
+    measure_stage,
 )
 from ygl_test_subject.modules.ff14.features.calendar_diagnostics import DECLARATION
 from ygl_test_subject.services.diagnostics import (
@@ -239,6 +240,23 @@ class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
     def codes(self):
         return [event.get("code") for event in self.attempt()["events"]]
+
+    def test_overlapping_http_wall_and_cumulative_survive_event_limit(self):
+        emit("core_start")
+        for _ in range(MAX_EVENTS):
+            emit("http_queue")
+        with patch(
+            "ygl_test_subject.infrastructure.sync_diagnostics.monotonic_ns",
+            side_effect=[0, 4_000_000, 10_000_000, 15_000_000],
+        ):
+            with measure_stage("http"):
+                with self.assertRaises(asyncio.CancelledError):
+                    with measure_stage("http"):
+                        raise asyncio.CancelledError
+        self.assertEqual(
+            self.attempt()["stage_timings"]["http"],
+            {"count": 2, "wall_us": 15000, "cumulative_us": 21000},
+        )
 
     async def test_queued_request_is_not_counted_and_transport_entry_is_counted(self):
         transport = _FakeTransport()

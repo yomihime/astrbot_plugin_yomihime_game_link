@@ -286,6 +286,10 @@ class FFLogsToolHostTests(unittest.IsolatedAsyncioTestCase):
         event = runtime_fixture._Event(context=self.context)
         event.message = '/ygl ff14 logs Cerberus "Synthetic Hero"'
         self.assertIsNone(await self.runtime.handle_event(event))
+        trace = self.runtime.core_runtime.sync_diagnostics.snapshot()["attempts"][-1]
+        self.assertEqual(trace["origin"], "command")
+        for stage in ("render", "host_send"):
+            self.assertEqual(trace["stage_timings"][stage]["count"], 1)
         reply = self.context.calls[-1][1].chain[0].text
         self.assertIn("Synthetic Hero", reply)
         self.assertIn("FFLogs", reply)

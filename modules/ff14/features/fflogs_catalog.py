@@ -184,6 +184,10 @@ class FFLogsCatalog:
     async def resolve_server(
         self, realm: str, server_label: str, *, page_budget: int = MAX_SERVER_PAGES
     ) -> ServerResolution:
+        directory = await self.load_servers(realm, page_budget=page_budget)
+        return match_servers(directory, server_label)
+
+    async def load_servers(self, realm: str, *, page_budget: int) -> ServerResolution:
         if type(page_budget) is not int or not 1 <= page_budget <= MAX_SERVER_PAGES:
             raise ValueError("invalid server page budget")
         regions = parse_regions(await self._request(REGIONS_QUERY, {}))
@@ -246,10 +250,7 @@ class FFLogsCatalog:
                     False, (), "server region exceeded its page budget"
                 )
 
-        matches = tuple(
-            server for server in servers if _server_matches(server, server_label)
-        )
-        return ServerResolution(True, matches)
+        return ServerResolution(True, tuple(servers))
 
     async def load_output_metadata(self) -> OutputMetadata:
         parse_output_metadata_projection(
@@ -1029,6 +1030,15 @@ def _short_text(value: object, limit: int) -> str:
 
 def _optional_text(value: object, limit: int) -> str | None:
     return None if value is None else _short_text(value, limit)
+
+
+def match_servers(directory: ServerResolution, label: str) -> ServerResolution:
+    if not directory.complete:
+        return directory
+    return ServerResolution(
+        True,
+        tuple(server for server in directory.matches if _server_matches(server, label)),
+    )
 
 
 def _server_matches(server: ServerRecord, value: str) -> bool:

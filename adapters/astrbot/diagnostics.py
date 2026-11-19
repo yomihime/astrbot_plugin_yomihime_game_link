@@ -83,4 +83,5 @@ def forward_sync_trace(event, *, logger=None):
     wire = json.dumps(event, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
     if len(wire.encode("ascii")) > 65536:
         raise ValueError("diagnostic trace limit")
-    logger.debug("GAME_LINK_TRACE " + wire)
+    tag = "GAME_LINK_OUTPUT" if "command_output_timings" in event else "GAME_LINK_TRACE"
+    logger.debug(tag + " " + wire)

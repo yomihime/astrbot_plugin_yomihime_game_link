@@ -89,10 +89,10 @@ class DutyOrderCatalog:
         self._epoch = object()
         self._cached = None
 
-    async def load(self, http, *, deadline=None, evidence=None, names=()):
-        if self._cached is not None and self._cached[0] > monotonic():
-            self._observe(evidence, *self._cached[1:], cached=True, names=names)
-            return self._cached[1]
+    async def load(
+        self, http, *, deadline=None, evidence=None, names=(), check_source=None
+    ):
+        cached = self._cached
         remaining = 3 if deadline is None else min(3, max(0, deadline - monotonic()))
         if remaining <= 0:
             self._observe(
@@ -103,6 +103,13 @@ class DutyOrderCatalog:
         pages = 0
         try:
             async with asyncio.timeout(remaining):
+                if cached is not None and cached[0] > monotonic():
+                    if check_source is not None:
+                        await check_source(SOURCE)
+                    if self._epoch is not epoch:
+                        raise ServiceUnavailable()
+                    self._observe(evidence, *cached[1:], cached=True, names=names)
+                    return cached[1]
                 rows, seen, cursor, complete = [], set(), None, False
                 for _ in range(MAX_PAGES):
                     query = (
@@ -152,7 +159,8 @@ class DutyOrderCatalog:
             state = "unavailable"
         if self._epoch is not epoch:
             raise ServiceUnavailable()
-        self._cached = (monotonic() + ttl, result, pages, state)
+        if cached is None or cached[0] <= monotonic():
+            self._cached = (monotonic() + ttl, result, pages, state)
         self._observe(evidence, result, pages, state, cached=False, names=names)
         return result
 

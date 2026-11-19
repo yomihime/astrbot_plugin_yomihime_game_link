@@ -5,9 +5,10 @@ from __future__ import annotations
 import copy
 import re
 from collections import OrderedDict
+from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
-from time import monotonic
+from dataclasses import dataclass, field
+from time import monotonic, monotonic_ns
 
 from ..yomihime_game_link_sdk.errors import AccessDenied, OperationTimeout
 
@@ -78,6 +79,7 @@ class _Context:
     origin: str
     started: float
     trace: dict | None = None
+    active_stages: dict = field(default_factory=dict)
     pending_warning: tuple | None = None
     terminal: bool = False
     http_failure: dict | None = None
@@ -87,6 +89,42 @@ class _Context:
 
 
 _current = ContextVar("runtime_diagnostic", default=None)
+_output_timing = ContextVar("command_output_timing", default=None)
+
+
+@contextmanager
+def measure_stage(name):
+    """Record active wall time (union of intervals) and cumulative work per trace."""
+    context = _output_timing.get() or _current.get()
+    if (
+        name not in {"auth", "http", "diagnostic_write", "render", "host_send"}
+        or context is None
+        or context.trace is None
+        or context.terminal
+    ):
+        yield
+        return
+    started = monotonic_ns()
+    active = context.active_stages
+    count, first = active.get(name, (0, started))
+    active[name] = (count + 1, first)
+    try:
+        yield
+    finally:
+        finished = monotonic_ns()
+        count, first = active[name]
+        if count == 1:
+            del active[name]
+        else:
+            active[name] = (count - 1, first)
+        if not context.terminal:
+            totals = context.trace.setdefault("stage_timings", {}).setdefault(
+                name, {"count": 0, "wall_us": 0, "cumulative_us": 0}
+            )
+            totals["count"] += 1
+            totals["cumulative_us"] += (finished - started) // 1000
+            if count == 1:
+                totals["wall_us"] += (finished - first) // 1000
 
 
 def defer_failure_report(invocation_id, sink, event):
@@ -130,6 +168,39 @@ class SyncDiagnostics:
         self._warning_sink = warning_sink
         self._trace_sink = trace_sink
         self._trace_enabled = trace_enabled
+
+    @contextmanager
+    def command_output(self, invocation_id):
+        # The gateway has already finalized its trace when Core dispatches output.
+        # Only continue an existing public command trace; never create a private one.
+        trace = self._attempts.get(invocation_id)
+        if self._closed or not trace or trace["origin"] != "command":
+            yield
+            return
+        context = _Context(self, invocation_id, "command", monotonic(), trace={})
+        token = _output_timing.set(context)
+        try:
+            yield
+        finally:
+            context.terminal = True
+            _output_timing.reset(token)
+            timings = context.trace.get("stage_timings")
+            if timings:
+                trace.setdefault("stage_timings", {}).update(timings)
+                try:
+                    if self._trace_sink and (
+                        self._trace_enabled is None or self._trace_enabled()
+                    ):
+                        self._trace_sink(
+                            {
+                                "invocation_id": invocation_id,
+                                "origin": "command",
+                                "command_output_timings": copy.deepcopy(timings),
+                            }
+                        )
+                except Exception:
+                    # A telemetry sink cannot change a completed send.
+                    pass
 
     def activate(
         self,

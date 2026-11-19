@@ -142,6 +142,10 @@ REQUEST_OPS = "UniversalisWorlds UniversalisDataCenters OtherBusinessRead FF14Wo
 REQUEST = obj(
     {
         "kind": text(values=["module_source_http_fetch"]),
+        "stage_ms": obj({stage: integer() for stage in STAGE_MESSAGES}, STAGE_MESSAGES),
+        "cumulative_http_ms": integer(),
+        "diagnostic_ms": integer(),
+        "outcome": text(values=["success", "partial_success", "error", "unknown"]),
         "operations": array(
             obj(
                 {

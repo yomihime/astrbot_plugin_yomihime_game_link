@@ -2098,7 +2098,8 @@ class CoreRuntime:
                     )
                 if origin is InvocationOrigin.LLM_TOOL:
                     self.issuer._require_message_current(view)
-                routed = await self.output.route(view, result)
+                with self.sync_diagnostics.command_output(view.invocation_id):
+                    routed = await self.output.route(view, result)
                 if origin is InvocationOrigin.LLM_TOOL:
                     self._require_accepting_ingress()
                     self.issuer._require_message_current(view)

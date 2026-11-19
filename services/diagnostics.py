@@ -9,7 +9,7 @@ from types import MappingProxyType
 
 from ..core.contracts.diagnostics import DiagnosticLimitExceeded, diagnostic_payload
 from ..core.public_errors import public_boundary
-from ..infrastructure.sync_diagnostics import defer_failure_report
+from ..infrastructure.sync_diagnostics import defer_failure_report, measure_stage
 from ..yomihime_game_link_sdk.errors import (
     AccessDenied,
     OperationTimeout,
@@ -211,13 +211,14 @@ class BoundDiagnostics:
         ):
             raise AccessDenied()
         try:
-            self.__store.record(
-                self.__invocation,
-                event_id,
-                self.__declarations[event_id],
-                payload,
-                self.__policy,
-            )
+            with measure_stage("diagnostic_write"):
+                self.__store.record(
+                    self.__invocation,
+                    event_id,
+                    self.__declarations[event_id],
+                    payload,
+                    self.__policy,
+                )
         except Exception as error:
             await self.__check()
             if isinstance(

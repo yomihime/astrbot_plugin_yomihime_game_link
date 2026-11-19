@@ -51,6 +51,7 @@ from ..core.ports import (
     SubscriptionStore,
 )
 from ..core.registry import Registry
+from ..infrastructure.sync_diagnostics import measure_stage
 from ..yomihime_game_link_sdk.cards import DenseCollage, WeightedCollage
 from ..yomihime_game_link_sdk.contexts import (
     InvocationOrigin,
@@ -504,13 +505,14 @@ class OutputService:
                 if resolved != versions:
                     cache_key = None
                 await check()
-            presentation = renderer(
-                replace(result.document, card=card),
-                audience=DisplayAudience.PRIVATE
-                if expected_origin is InvocationOrigin.JOB
-                else DisplayAudience.PUBLIC,
-                **theme,
-            )
+            with measure_stage("render"):
+                presentation = renderer(
+                    replace(result.document, card=card),
+                    audience=DisplayAudience.PRIVATE
+                    if expected_origin is InvocationOrigin.JOB
+                    else DisplayAudience.PUBLIC,
+                    **theme,
+                )
             if type(presentation) is not CommandPresentation:
                 raise ValueError("bounded rendering is unavailable")
             pages = presentation.bitmaps or (
@@ -609,22 +611,25 @@ class OutputService:
                     result = await self._analysis.apply(
                         invocation, target, result, current=analysis_current
                     )
-                rendered = await self._render(
-                    result,
-                    invocation=invocation,
-                    target=target,
-                    image=image if (public_command or collage or owned_image) else None,
-                )
-                if image.get("collage"):
-                    try:
-                        await self._prepare_collage_image(
-                            invocation, result, target, rendered, image
-                        )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:
-                        self._release_collage_image(image)
-                        image.clear()
+                with measure_stage("render"):
+                    rendered = await self._render(
+                        result,
+                        invocation=invocation,
+                        target=target,
+                        image=image
+                        if (public_command or collage or owned_image)
+                        else None,
+                    )
+                    if image.get("collage"):
+                        try:
+                            await self._prepare_collage_image(
+                                invocation, result, target, rendered, image
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            self._release_collage_image(image)
+                            image.clear()
                 self._admission.check(self._root_lease(invocation))
             except _OutputFailure as exc:
                 return await self._controlled(
@@ -804,7 +809,8 @@ class OutputService:
                         except Exception:
                             receipt = MessageReceipt(MessageStatus.FAILED)
                         else:
-                            receipt = await prepared.dispatch()
+                            with measure_stage("host_send"):
+                                receipt = await prepared.dispatch()
                     elif image:
                         audience = (
                             DisplayAudience.PRIVATE
@@ -820,22 +826,27 @@ class OutputService:
                             audience=audience,
                         ) as png:
                             content = await png.read_once()
-                            receipt = await self._command_sender(
-                                invocation,
-                                result,
-                                target,
-                                RenderedMessage(rendered.text, png_bytes=content),
-                                image_current=lambda: self._generated_png._lease(png),
-                            )
+                            with measure_stage("host_send"):
+                                receipt = await self._command_sender(
+                                    invocation,
+                                    result,
+                                    target,
+                                    RenderedMessage(rendered.text, png_bytes=content),
+                                    image_current=lambda: self._generated_png._lease(
+                                        png
+                                    ),
+                                )
                     elif public_command and self._command_sender is not None:
-                        receipt = await self._command_sender(
-                            invocation, result, target, rendered
-                        )
+                        with measure_stage("host_send"):
+                            receipt = await self._command_sender(
+                                invocation, result, target, rendered
+                            )
                     else:
                         # Keep private/granted/OWNER text on the original
                         # approved path. Exact-event preparation adds awaits
                         # after Admission's protected authorization handoff.
-                        receipt = await self._message_port.send(target, rendered)
+                        with measure_stage("host_send"):
+                            receipt = await self._message_port.send(target, rendered)
                     if not isinstance(receipt, MessageReceipt):
                         receipt = MessageReceipt(MessageStatus.UNKNOWN)
                 except asyncio.CancelledError:

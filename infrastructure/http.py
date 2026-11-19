@@ -34,6 +34,7 @@ from ..yomihime_game_link_sdk.declarations import SourceDeclaration
 from ..yomihime_game_link_sdk.errors import SourceHttpError
 from ..yomihime_game_link_sdk.services import HttpRequest, HttpResponse, SourceHttp
 from .sync_diagnostics import emit as diagnostic
+from .sync_diagnostics import measure_stage
 
 
 def _retry_after_seconds(response: HttpResponse) -> int | None:
@@ -846,9 +847,11 @@ class SourceHttpService(SourceHttp):
             )
             raise SourceHttpError("credentials_unavailable") from None
         try:
-            return await self._wait_for_deadline(
-                service.authorize(module_id, declaration, request, deadline), deadline
-            )
+            with measure_stage("auth"):
+                return await self._wait_for_deadline(
+                    service.authorize(module_id, declaration, request, deadline),
+                    deadline,
+                )
         except asyncio.CancelledError:
             raise
         except SourceHttpError as error:
