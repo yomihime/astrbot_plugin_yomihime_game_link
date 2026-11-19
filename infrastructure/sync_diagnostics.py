@@ -93,17 +93,48 @@ _output_timing = ContextVar("command_output_timing", default=None)
 
 
 @contextmanager
-def measure_stage(name):
+def measure_stage(name, *, declaration=None):
     """Record active wall time (union of intervals) and cumulative work per trace."""
     context = _output_timing.get() or _current.get()
     if (
-        name not in {"auth", "http", "diagnostic_write", "render", "host_send"}
+        name
+        not in {
+            "auth",
+            "http",
+            "oauth_http",
+            "diagnostic_write",
+            "diagnostic_emit",
+            "render",
+            "bitmap_render",
+            "host_send",
+            "host_event_send",
+        }
         or context is None
         or context.trace is None
         or context.terminal
     ):
         yield
         return
+    if declaration is not None:
+        # Only pass identifiers validated against the source/event declarations.
+        if (
+            name not in {"http", "oauth_http", "diagnostic_emit"}
+            or type(declaration) is not str
+            or not _LABEL.fullmatch(declaration)
+        ):
+            yield
+            return
+        name = f"{name}.{declaration}"
+        retained = (
+            context.trace.get("stage_timings", {}).keys() | context.active_stages.keys()
+        )
+        if (
+            name not in retained
+            and sum(item.startswith(name.split(".", 1)[0] + ".") for item in retained)
+            >= 32
+        ):
+            yield
+            return
     started = monotonic_ns()
     active = context.active_stages
     count, first = active.get(name, (0, started))

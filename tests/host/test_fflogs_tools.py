@@ -288,7 +288,13 @@ class FFLogsToolHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.runtime.handle_event(event))
         trace = self.runtime.core_runtime.sync_diagnostics.snapshot()["attempts"][-1]
         self.assertEqual(trace["origin"], "command")
-        for stage in ("render", "host_send"):
+        for stage in (
+            "render",
+            "host_send",
+            "bitmap_render",
+            "host_event_send",
+            "diagnostic_emit.FF14RequestSummary",
+        ):
             self.assertEqual(trace["stage_timings"][stage]["count"], 1)
         reply = self.context.calls[-1][1].chain[0].text
         self.assertIn("Synthetic Hero", reply)

@@ -360,14 +360,22 @@ class FFLogsCharacterLookup:
         targets = _catalog_query_targets(
             select_character_zones(metadata, character.zone_id)
         )
+        has_cache = getattr(scope, "cache", None) is not None
         lock = (
             self._refresh(
                 ("history", identity, character.zone_id, character.metric), stop_at
             )
-            if getattr(scope, "cache", None) is not None
+            if has_cache
             else nullcontext(True)
         )
+        wait_started = monotonic()
         async with lock as acquired:
+            if metrics is not None:
+                metrics.history_timing = {
+                    "refresh_wait_ms": max(0, int((monotonic() - wait_started) * 1000))
+                    if has_cache
+                    else 0
+                }
             if self._lifecycle is not lifecycle:
                 raise ServiceUnavailable()
             if not acquired:
@@ -386,6 +394,7 @@ class FFLogsCharacterLookup:
                 targets,
                 identity,
                 started,
+                metrics,
                 budget,
                 failures,
             )
@@ -403,6 +412,7 @@ class FFLogsCharacterLookup:
         targets,
         identity,
         started,
+        metrics,
         budget,
         failures,
     ):
@@ -436,6 +446,10 @@ class FFLogsCharacterLookup:
             "history_budget_ms": max(0, int((stop_at - started) * 1000)),
             **(budget or {}),
         }
+
+        if metrics is not None:
+            summary.update(metrics.history_timing)
+            metrics.history_timing = summary
 
         def active():
             if self._lifecycle is not lifecycle:
@@ -520,26 +534,39 @@ class FFLogsCharacterLookup:
         summary["read_ms"] = max(0, int((monotonic() - read_started) * 1000))
         pairs = tuple(key for key in keys if key in eligible and key not in cached)
         fetch_started = monotonic()
-        history = self._fetch_catalog_rankings(
-            scope,
-            source_id,
-            character,
-            metadata,
-            identity_variables,
-            lifecycle,
-            evidence,
-            deadline=fetch_stop,
-            targets=targets,
-            pairs=pairs,
-            outcomes=fresh,
-            fetched=acquired,
-            on_attempt=attempted.update,
-            summary=summary,
-            failures=failures,
-        )
+
+        async def timed(key, operation):
+            started = monotonic()
+            try:
+                return await operation()
+            finally:
+                summary[key] = max(0, int((monotonic() - started) * 1000))
+
+        def history():
+            return self._fetch_catalog_rankings(
+                scope,
+                source_id,
+                character,
+                metadata,
+                identity_variables,
+                lifecycle,
+                evidence,
+                deadline=fetch_stop,
+                targets=targets,
+                pairs=pairs,
+                outcomes=fresh,
+                fetched=acquired,
+                on_attempt=attempted.update,
+                summary=summary,
+                failures=failures,
+            )
+
         # Menu sorting and FFLogs history use separate sources and no shared inputs
         # beyond the verified catalog. Join both before assembling or saving rows.
-        tasks = [asyncio.create_task(order()), asyncio.create_task(history)]
+        tasks = [
+            asyncio.create_task(timed("duty_order_ms", order)),
+            asyncio.create_task(timed("ranking_fetch_ms", history)),
+        ]
         try:
             duty_order, _ = await asyncio.gather(*tasks)
         finally:
@@ -990,15 +1017,9 @@ class FFLogsCharacterLookup:
                 result = observation.attach(result)
         if metrics is not None and metrics.evidence is not None:
             failures.end_stage()
-            diagnostics_started = monotonic()
-            await metrics.evidence.flush()
-            metrics.finish(
-                outcome=result.status.value,
-                stages=failures.stage_ms,
-                diagnostic_ms=metrics.evidence.projection_ms
-                + int((monotonic() - diagnostics_started) * 1000),
+            await metrics.flush_result(
+                outcome=result.status.value, stages=failures.stage_ms
             )
-            await metrics.evidence.flush()
         return result
 
     async def _execute(

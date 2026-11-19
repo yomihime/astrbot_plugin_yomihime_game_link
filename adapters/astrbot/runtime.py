@@ -39,6 +39,7 @@ from ...infrastructure.managed_key_manager import ManagedKeyManager
 from ...infrastructure.private_storage import resolve_private_storage
 from ...infrastructure.secret_codec import AESGCMSecretCodec
 from ...infrastructure.sqlite.database import SQLiteDatabase
+from ...infrastructure.sync_diagnostics import measure_stage
 from ...presentation.command_card import CommandCardRenderer
 from ...presentation.command_text import project_command_heading
 from ...presentation.rendering import GenericDisplayRenderer, RenderingBounds
@@ -608,7 +609,8 @@ class AstrBotRuntime:
             self._data_dir / "resources" / "fonts"
         )
         self._command_cards = CommandCardRenderer(
-            font_provider_factory=self._managed_font.provider
+            font_provider_factory=self._managed_font.provider,
+            bitmap_timing=lambda: measure_stage("bitmap_render"),
         )
         self._message_port = None
         self._help_image_count = 0

@@ -281,6 +281,12 @@ class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         try:
             await production.request(_request(query=(("secret", SECRET),)))
             self.assertEqual(self.attempt()["network_attempts"], 1)
+            timings = self.attempt()["stage_timings"]
+            self.assertEqual(timings["http." + _request().source_id]["count"], 1)
+            self.assertGreaterEqual(
+                timings["http"]["wall_us"],
+                timings["http." + _request().source_id]["wall_us"],
+            )
             self.assertFalse(session.calls[0][1]["allow_redirects"])
             self.assertTrue(
                 any(e.get("http_status") == 200 for e in self.attempt()["events"])

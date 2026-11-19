@@ -202,6 +202,15 @@ class BoundDiagnostics:
 
     @public_boundary("service")
     async def emit(self, event_id, payload):
+        declared = type(event_id) is str and event_id in self.__declarations
+        # Include authority checks on either side of the store, on the original
+        # await. An unchecked identifier must never become a trace field.
+        with measure_stage(
+            "diagnostic_emit", declaration=event_id if declared else None
+        ):
+            await self.__emit(event_id, payload)
+
+    async def __emit(self, event_id, payload):
         await self.__check()
         if (
             type(event_id) is not str

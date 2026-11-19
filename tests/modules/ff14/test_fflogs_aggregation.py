@@ -766,6 +766,14 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
             if item["event_id"] == "FF14RequestSummary"
         )
         summary = summary_event["payload"]["payload"]
+        self.assertEqual(summary["history"]["refresh_wait_ms"], 0)
+        self.assertGreater(summary["history"]["planned"], 0)
+        self.assertGreater(summary["history"]["attempted"], 0)
+        self.assertGreaterEqual(summary["history"]["ranking_fetch_ms"], 0)
+        self.assertGreaterEqual(summary["history"]["duty_order_ms"], 0)
+        self.assertGreaterEqual(
+            summary["history"]["fetch_ms"], summary["history"]["ranking_fetch_ms"]
+        )
         self.assertEqual(summary_event["payload"]["source"], "fflogs_public_cn")
         self.assertIsNone(summary_event["payload"]["status"])
         self.assertFalse(summary_event["payload"]["cached"])

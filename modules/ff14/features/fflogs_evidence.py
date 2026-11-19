@@ -8,7 +8,7 @@ import json
 import re
 from decimal import Decimal
 from secrets import token_hex
-from time import monotonic
+from time import monotonic, monotonic_ns
 
 from ....yomihime_game_link_sdk.errors import ServiceUnavailable
 from .fflogs_failures import STAGE_MESSAGES
@@ -61,6 +61,7 @@ class RequestMetrics:
         self.started = monotonic()
         self.operations = {}
         self.evidence = None
+        self.history_timing = None
 
     def _entry(self, operation):
         return self.operations.setdefault(
@@ -119,7 +120,31 @@ class RequestMetrics:
 
         return ObservedHttp()
 
-    def finish(self, *, outcome="unknown", stages=None, diagnostic_ms=0):
+    async def flush_result(self, *, outcome, stages):
+        """Observe both completed flushes, including every awaited SDK authority check."""
+        before = monotonic_ns()
+        first_count = await self.evidence.flush()
+        first_us = (monotonic_ns() - before) // 1000
+        self.finish(
+            outcome=outcome,
+            stages=stages,
+            diagnostic_ms=self.evidence.projection_ms + first_us // 1000,
+            evidence_flush_us=first_us,
+            evidence_events=first_count,
+        )
+        # The sole remaining event is submitted directly. Core times that declared
+        # emit across both authority checks, without a third diagnostic call.
+        await self.evidence.flush_summary()
+
+    def finish(
+        self,
+        *,
+        outcome="unknown",
+        stages=None,
+        diagnostic_ms=0,
+        evidence_flush_us=None,
+        evidence_events=None,
+    ):
         if self.evidence is not None:
             self.evidence.observe(
                 "FF14RequestSummary",
@@ -127,6 +152,9 @@ class RequestMetrics:
                     "kind": "module_source_http_fetch",
                     "stage_ms": stages or {},
                     "diagnostic_ms": diagnostic_ms,
+                    "evidence_flush_us": evidence_flush_us,
+                    "evidence_events": evidence_events,
+                    "history": self.history_timing,
                     "cumulative_http_ms": sum(
                         row["elapsed_ms"] for row in self.operations.values()
                     ),
@@ -350,7 +378,22 @@ def project(operation, payload):
         def count(value):
             return value if type(value) is int and 0 <= value <= 2147483647 else 0
 
+        from .diagnostic_declarations import HISTORY_TIMING_FIELDS
+
+        optional = {
+            key: count(payload[key])
+            for key in ("evidence_flush_us", "evidence_events")
+            if type(payload.get(key)) is int
+        }
+        history = payload.get("history")
+        if isinstance(history, dict):
+            optional["history"] = {
+                key: count(history[key])
+                for key in HISTORY_TIMING_FIELDS
+                if key in history
+            }
         return {
+            **optional,
             "stage_ms": {
                 stage: count(value)
                 for stage, value in (payload.get("stage_ms") or {}).items()
@@ -898,14 +941,22 @@ class Evidence:
             )
         )
 
+    async def _emit(self, operation, payload):
+        try:
+            await self._diagnostics.emit(operation, payload)
+        except (PermissionError, TimeoutError, ServiceUnavailable):
+            raise
+        except Exception:
+            # Optional telemetry failures do not change an authorized result.
+            pass
+
+    async def flush_summary(self):
+        if self._pending:
+            operation, payload = self._pending.pop()
+            await self._emit(operation, payload)
+
     async def flush(self):
-        # No rebind, logging backchannel, or stored invocation beyond this call.
         pending, self._pending = self._pending, []
         for operation, payload in pending:
-            try:
-                await self._diagnostics.emit(operation, payload)
-            except (PermissionError, TimeoutError, ServiceUnavailable):
-                raise
-            except Exception:
-                # Optional diagnostics must not replace a validated result.
-                continue
+            await self._emit(operation, payload)
+        return len(pending)

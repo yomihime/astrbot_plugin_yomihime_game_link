@@ -132,6 +132,7 @@ class AioHttpTransport:
                 headers,
                 float(request.timeout_seconds),
                 request.max_response_bytes,
+                source_id=declaration.source_id,
             )
         except asyncio.CancelledError:
             diagnostic("transport_error", code="cancelled")
@@ -162,7 +163,14 @@ class AioHttpTransport:
             except Exception:
                 raise SourceHttpError("request_rejected") from None
             return await self._send(
-                "POST", url, body, headers, timeout_seconds, maximum
+                "POST",
+                url,
+                body,
+                headers,
+                timeout_seconds,
+                maximum,
+                source_id=request.source_id,
+                oauth=True,
             )
         except asyncio.CancelledError:
             raise
@@ -187,6 +195,9 @@ class AioHttpTransport:
         request_headers: dict[str, str],
         timeout_seconds: float,
         maximum: int,
+        *,
+        source_id: str,
+        oauth: bool = False,
     ) -> HttpResponse:
         session = await self._get_session()
         headers = dict(request_headers)
@@ -194,7 +205,10 @@ class AioHttpTransport:
         # An entry count, not proof of headers sent or peer receipt.
         check_current_effect(getattr(self, "_effect_guard", None))
         diagnostic("network_attempt")
-        with measure_stage("http"):
+        with (
+            measure_stage("http"),
+            measure_stage("oauth_http" if oauth else "http", declaration=source_id),
+        ):
             async with session.request(
                 method,
                 url,

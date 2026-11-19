@@ -6,6 +6,7 @@ text, or an explicit size hint when the complete text exceeds the send budget.
 """
 
 from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, fields, is_dataclass, replace
 
 from ..core.contracts.validation_boundary import validate_contract
@@ -149,11 +150,17 @@ class CommandCardRenderer:
     """Trusted, command-only presentation policy. Optional Pillow fails to text."""
 
     def __init__(
-        self, *, max_text_chars=6000, max_text_lines=200, font_provider_factory=None
+        self,
+        *,
+        max_text_chars=6000,
+        max_text_lines=200,
+        font_provider_factory=None,
+        bitmap_timing=nullcontext,
     ):
         self._max_text_chars = max_text_chars
         self._max_text_lines = max_text_lines
         self._text = TextPresenter()
+        self._bitmap_timing = bitmap_timing
         self._font_provider_factory = font_provider_factory or BundledFontProvider
 
     def __call__(
@@ -193,25 +200,28 @@ class CommandCardRenderer:
             return CommandPresentation(fallback)
         bitmaps = ()
         try:
-            if document.card is not None:
-                selected = apply_theme_selection(
-                    document.card, core_theme, module_theme
-                )
-                if len(selected.blocks) == 1 and type(selected.blocks[0]) in (
-                    cards.WeightedCollage,
-                    cards.DenseCollage,
-                ):
-                    bitmaps = render_document_pages(
-                        selected, font_provider=self._font_provider_factory()
+            with self._bitmap_timing():
+                if document.card is not None:
+                    selected = apply_theme_selection(
+                        document.card, core_theme, module_theme
                     )
-                    bitmap = bitmaps[0]
+                    if len(selected.blocks) == 1 and type(selected.blocks[0]) in (
+                        cards.WeightedCollage,
+                        cards.DenseCollage,
+                    ):
+                        bitmaps = render_document_pages(
+                            selected, font_provider=self._font_provider_factory()
+                        )
+                        bitmap = bitmaps[0]
+                    else:
+                        bitmap = render_document(
+                            selected,
+                            font_provider=self._font_provider_factory(),
+                        )
                 else:
-                    bitmap = render_document(
-                        selected,
-                        font_provider=self._font_provider_factory(),
+                    bitmap = render_card(
+                        spec, font_provider=self._font_provider_factory()
                     )
-            else:
-                bitmap = render_card(spec, font_provider=self._font_provider_factory())
         except Exception:
             bitmap = None
             bitmaps = ()

@@ -465,7 +465,9 @@ class OutputService:
                 "core_theme": settings.core_theme,
                 "module_theme": settings.module_theme,
             }
-        renderer = self._command_card_renderer or CommandCardRenderer()
+        renderer = self._command_card_renderer or CommandCardRenderer(
+            bitmap_timing=lambda: measure_stage("bitmap_render")
+        )
         cache_key = None
         pages = None
         if (
@@ -1266,7 +1268,9 @@ class OutputService:
             collage_profile=True,
         )
         await current()
-        renderer = self._command_card_renderer or CommandCardRenderer()
+        renderer = self._command_card_renderer or CommandCardRenderer(
+            bitmap_timing=lambda: measure_stage("bitmap_render")
+        )
         from ..yomihime_game_link_sdk.display import ImageBlock, TextBlock
 
         text_blocks = tuple(

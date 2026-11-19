@@ -2968,6 +2968,54 @@
                 "additionalProperties": false
               },
               "s8": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 64
+              },
+              "s9": {
+                "type": "object",
+                "properties": {
+                  "refresh_wait_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "planned": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "eligible": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "cache_hit": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "attempted": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "not_queried": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "read_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "ranking_fetch_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "duty_order_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "fetch_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "write_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "total_ms": {
+                    "$ref": "#/$defs/s7"
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "s10": {
                 "type": "string",
                 "maxLength": 160,
                 "enum": [
@@ -2977,7 +3025,7 @@
                   "unknown"
                 ]
               },
-              "s11": {
+              "s13": {
                 "type": "string",
                 "maxLength": 160,
                 "enum": [
@@ -2994,7 +3042,7 @@
                   "FF14CatalogCharacter"
                 ]
               },
-              "s12": {
+              "s14": {
                 "type": "string",
                 "maxLength": 160,
                 "enum": [
@@ -3003,11 +3051,11 @@
                   "unknown"
                 ]
               },
-              "s10": {
+              "s12": {
                 "type": "object",
                 "properties": {
                   "operation": {
-                    "$ref": "#/$defs/s11"
+                    "$ref": "#/$defs/s13"
                   },
                   "attempts": {
                     "$ref": "#/$defs/s7"
@@ -3025,7 +3073,7 @@
                     "$ref": "#/$defs/s7"
                   },
                   "cache": {
-                    "$ref": "#/$defs/s12"
+                    "$ref": "#/$defs/s14"
                   }
                 },
                 "required": [
@@ -3039,21 +3087,21 @@
                 ],
                 "additionalProperties": false
               },
-              "s9": {
+              "s11": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/s10"
+                  "$ref": "#/$defs/s12"
                 },
                 "maxItems": 11
               },
-              "s13": {
+              "s15": {
                 "type": "string",
                 "maxLength": 160,
                 "enum": [
                   "unknown"
                 ]
               },
-              "s14": {
+              "s16": {
                 "type": "string",
                 "maxLength": 160,
                 "enum": [
@@ -3075,23 +3123,32 @@
                   "diagnostic_ms": {
                     "$ref": "#/$defs/s7"
                   },
-                  "outcome": {
+                  "evidence_flush_us": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "evidence_events": {
                     "$ref": "#/$defs/s8"
                   },
-                  "operations": {
+                  "history": {
                     "$ref": "#/$defs/s9"
+                  },
+                  "outcome": {
+                    "$ref": "#/$defs/s10"
+                  },
+                  "operations": {
+                    "$ref": "#/$defs/s11"
                   },
                   "elapsed_ms": {
                     "$ref": "#/$defs/s7"
                   },
                   "underlying_http_cache": {
-                    "$ref": "#/$defs/s13"
+                    "$ref": "#/$defs/s15"
                   },
                   "host_oauth": {
-                    "$ref": "#/$defs/s14"
+                    "$ref": "#/$defs/s16"
                   },
                   "network_attempts": {
-                    "$ref": "#/$defs/s13"
+                    "$ref": "#/$defs/s15"
                   }
                 },
                 "required": [
