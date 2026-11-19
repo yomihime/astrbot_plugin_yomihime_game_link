@@ -13,6 +13,7 @@ from ygl_test_subject.core.contracts.cards import validate_card
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.public_result import public_fact_strings
 from ygl_test_subject.modules.ff14.features.fflogs import (
+    CATALOG_BATCH_SIZE,
     CATALOG_DIAGNOSTIC_BYTES,
     FFLogsCharacterLookup,
     _bounded_catalog_targets,
@@ -190,7 +191,8 @@ def catalog_rankings(
             target for target in targets if target[0].zone_id in target_zone_ids
         )
     else:
-        targets = targets[batch_index * 12 : (batch_index + 1) * 12]
+        start = batch_index * CATALOG_BATCH_SIZE
+        targets = targets[start : start + CATALOG_BATCH_SIZE]
     value = {
         "id": 42,
         "name": "Synthetic Hero",
@@ -827,7 +829,7 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(queried), 16)
         self.assertTrue(
             all(
-                sum(key.startswith("z") for key in variables) <= 12
+                sum(key.startswith("z") for key in variables) <= CATALOG_BATCH_SIZE
                 for variables in batches
             )
         )
@@ -1144,7 +1146,7 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
             if request.body is not None
             and "FF14CatalogCharacter" in json.loads(request.body)["query"]
         )
-        self.assertEqual(len([key for key in variables if key.startswith("z")]), 12)
+        self.assertEqual(len([key for key in variables if key.startswith("z")]), 16)
         self.assertTrue(any("查询失败" in warning for warning in result.warnings))
         rows = result.document.card.blocks[0].blocks[0].rows
         self.assertEqual(rows[1][-1].spans[0].text, "ERR")

@@ -409,7 +409,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                             PartitionRecord(1, "标准阵容构成 (Synthetic)", True),
                         ),
                     )
-                    for i in range(40)
+                    for i in range(60)
                 ),
                 *(zone(i, f"Synthetic tier {i}") for i in (73, 74, 75)),
             ),
@@ -486,7 +486,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
             [group.zone_id for group in result.groups if group.category == "savage"],
             [73, 74, 75],
         )
-        self.assertEqual(len(result.groups), 43)
+        self.assertEqual(len(result.groups), 63)
 
     async def test_cancel_stops_two_inflight_batches_and_never_starts_queued_targets(
         self,
@@ -502,7 +502,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                             PartitionRecord(1, "标准阵容构成 (Synthetic)", True),
                         ),
                     )
-                    for i in range(40)
+                    for i in range(60)
                 ),
                 *(zone(i, f"Synthetic tier {i}") for i in (73, 74, 75)),
             ),
@@ -573,7 +573,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                             PartitionRecord(1, "标准阵容构成 (Synthetic)", True),
                         ),
                     )
-                    for i in range(13)
+                    for i in range(25)
                 ),
             ),
             (),
@@ -888,7 +888,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
             },
             handler._lifecycle,
         )
-        self.assertEqual((len(calls), peak), (46, 2))
+        self.assertEqual((len(calls), peak), (23, 2))
         self.assertEqual(
             sum(
                 sum(key.startswith("z") for key in item["variables"]) for item in calls

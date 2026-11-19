@@ -275,12 +275,13 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
 
         async def altered(request):
             response = await original(request)
-            if len(self.calls) == 10:
+            if len(self.calls) == 5:
                 raise OSError("Synthetic last batch failure")
             if len(self.calls) == 1:
                 value = json.loads(response.body)
                 character = value["data"]["characterData"]["character"]
                 character.pop("z0")
+                value["errors"] = [{"path": ["characterData", "character", "z0"]}]
                 character["z1"] = {"malformed": True}
                 return SimpleNamespace(status_code=200, body=json.dumps(value).encode())
             return response
@@ -298,7 +299,7 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
                 summary["request_failed"],
                 summary["not_queried"],
             ),
-            (111, 111, 1, 1, 3, 0),
+            (111, 111, 1, 1, 15, 0),
         )
         self.assertGreater(summary["fresh_positive"], 0)
         self.assertGreater(summary["fresh_empty"], 0)
@@ -322,28 +323,59 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rate_limit_stops_queued_batches_without_inventing_coverage(self):
         self.scope.cache = None
-        calls = 0
-        menu_calls = 0
+        for code, status in (("upstream_error", 429), ("rate_limited", None)):
+            with self.subTest(code=code):
+                calls = []
 
-        async def limited(request):
-            nonlocal calls, menu_calls
-            if request.source_id == "xivapi_items":
-                menu_calls += 1
-            else:
-                calls += 1
-            raise SourceHttpError("rate_limited", status_code=429)
+                async def limited(request):
+                    calls.append(request.source_id)
+                    raise SourceHttpError(code, status_code=status)
 
-        self.scope.http.fetch = limited
-        events, evidence = self.summary()
-        result = await self.collect(evidence)
-        summary = events[-1][1]
-        self.assertEqual(calls, 1)
-        self.assertEqual(menu_calls, 1)
-        self.assertEqual(
-            (summary["attempted"], summary["request_failed"], summary["not_queried"]),
-            (12, 12, 99),
-        )
-        self.assertFalse(result.catalog_complete)
+                self.scope.http.fetch = limited
+                events, evidence = self.summary()
+                result = await self.collect(evidence)
+                summary = events[-1][1]
+                self.assertEqual(calls.count(self.source), 1)
+                self.assertEqual(
+                    (
+                        summary["attempted"],
+                        summary["request_failed"],
+                        summary["not_queried"],
+                    ),
+                    (24, 24, 87),
+                )
+                self.assertFalse(result.catalog_complete)
+
+    async def test_size_fallback_completes_all_scopes_with_smaller_batches(self):
+        self.scope.cache = None
+        original = self.fetch
+        reference = await self.collect()
+        for mode in ("parser", "transport"):
+            with self.subTest(mode=mode):
+                sizes = []
+
+                async def fetch(request):
+                    if request.source_id != self.source:
+                        raise OSError("Synthetic menu unavailable")
+                    variables = json.loads(request.body)["variables"]
+                    sizes.append(sum(key.startswith("z") for key in variables))
+                    if sizes[-1] > 12:
+                        if mode == "parser":
+                            return SimpleNamespace(
+                                status_code=200, body=b"x" * 1_000_001
+                            )
+                        raise SourceHttpError("response_too_large")
+                    return await original(request)
+
+                self.scope.http.fetch = fetch
+                events, evidence = self.summary()
+                result = await self.collect(evidence)
+                self.assertEqual(sizes[0], 24)
+                self.assertTrue(all(size <= 12 for size in sizes[1:]))
+                self.assertEqual(sum(sizes[1:]), 111)
+                self.assertTrue(result.catalog_complete)
+                self.assertEqual(result.groups, reference.groups)
+                self.assertEqual(events[-1][1]["attempted"], 111)
 
     async def test_production_invoke_consumes_context_deadline_and_validates_result(
         self,
@@ -357,7 +389,7 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
         async def fetch(request):
             if "FF14CatalogCharacter" in json.loads(request.body)["query"]:
                 response = await catalog_fetch(request)
-                clock[0] += 4
+                clock[0] += 8
                 await asyncio.sleep(0)
                 return response
             return await base.fetch(request)

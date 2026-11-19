@@ -170,6 +170,10 @@ class FFLogsGraphQLError(ValueError):
     """A GraphQL envelope contains a bounded, nonempty errors list."""
 
 
+class FFLogsResponseTooLarge(FFLogsPayloadError):
+    """The complete GraphQL response exceeds the local decoder's byte limit."""
+
+
 class FFLogsCatalog:
     """Resolve readable labels only against bounded, schema-checked lists."""
 
@@ -301,8 +305,10 @@ class FFLogsCatalog:
 def parse_graphql_envelope(
     body: bytes, *, exact_numbers: bool = False, allow_partial_errors: bool = False
 ) -> dict[str, Any]:
-    if not isinstance(body, bytes) or len(body) > 1_000_000:
-        raise FFLogsPayloadError("GraphQL response exceeds its parser budget")
+    if not isinstance(body, bytes):
+        raise FFLogsPayloadError("GraphQL response must be bytes")
+    if len(body) > 1_000_000:
+        raise FFLogsResponseTooLarge("GraphQL response exceeds its parser budget")
     try:
         value = json.loads(
             body.decode("utf-8"), parse_float=Decimal if exact_numbers else float

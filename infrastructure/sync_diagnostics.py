@@ -102,6 +102,8 @@ def measure_stage(name, *, declaration=None):
             "auth",
             "http",
             "oauth_http",
+            "cache_lookup",
+            "cache_put",
             "diagnostic_write",
             "diagnostic_emit",
             "render",

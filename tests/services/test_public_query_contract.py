@@ -5,6 +5,7 @@ from collections.abc import Mapping
 
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.invocation import Gateway
+from ygl_test_subject.infrastructure.sync_diagnostics import SyncDiagnostics, emit
 from ygl_test_subject.services.module_services import _BoundCache
 from ygl_test_subject.services.output import OutputService
 
@@ -64,6 +65,24 @@ class PublicCacheContractTests(unittest.IsolatedAsyncioTestCase):
                 ygl.CacheQuery(key, ygl.CacheVisibility.PUBLIC)
             )
             self.assertIs(result.status, ygl.CacheLookupStatus.MISS)
+
+    async def test_cache_timing_exposes_only_operation_counts_and_durations(self):
+        trace = SyncDiagnostics()
+        self.addCleanup(trace.close)
+        trace.activate("a" * 32, "command")
+        emit("core_start")
+        cache = self.bound(self.fixture._invocation("alice"))
+        await cache.put("private-key", {"value": "private-data"}, ttl_seconds=60)
+        await cache.lookup(ygl.CacheQuery("private-key"))
+        snapshot = trace.snapshot()
+        timings = snapshot["attempts"][-1]["stage_timings"]
+        for stage in ("cache_lookup", "cache_put"):
+            self.assertEqual(set(timings[stage]), {"count", "wall_us", "cumulative_us"})
+            self.assertEqual(timings[stage]["count"], 1)
+            self.assertGreater(timings[stage]["wall_us"], 0)
+            self.assertEqual(timings[stage]["wall_us"], timings[stage]["cumulative_us"])
+        self.assertNotIn("private-key", str(snapshot))
+        self.assertNotIn("private-data", str(snapshot))
 
     async def test_default_stays_user_and_private_binding_cannot_write_public(self):
         alice = self.bound(self.fixture._invocation("alice"))

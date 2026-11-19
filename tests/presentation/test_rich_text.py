@@ -84,6 +84,36 @@ class RichTextTests(unittest.TestCase):
                 )
                 session.paint()
 
+    def test_contrast_samples_only_visible_ink_inside_glyph_rectangle(self):
+        span = rich.TextSpan("O")
+        face = rich.face_color(span, self.palette)
+        with Image.new("RGB", (1200, 480), "white") as image:
+            probe = rich.RichSession(image)
+            flat = probe.add(
+                span, font=self.font, size=20, palette=self.palette, left=65, top=65
+            )
+            self.assertEqual(flat.background, "#ffffff")
+            with rich.ExitStack() as stack:
+                mask = probe._mask(probe.plans[0], stack)
+                x, y, *_ = flat.patch_bounds
+                x0, y0, x1, y1 = mask.getbbox()
+                points = [
+                    (cx, cy) for cy in range(y0, y1) for cx in range(x0, x1)
+                ]
+                outside = next(p for p in points if mask.getpixel(p) == 0)
+                edge = next(p for p in points if 0 < mask.getpixel(p) < 255)
+            probe.close()
+            image.putpixel((outside[0] + x, outside[1] + y), rich.rgb(face))
+            image.putpixel((edge[0] + x, edge[1] + y), (128, 128, 128))
+            mixed = rich.RichSession(image)
+            try:
+                sampled = mixed.add(
+                    span, font=self.font, size=20, palette=self.palette, left=65, top=65
+                )
+                self.assertEqual(sampled.background, "#808080")
+            finally:
+                mixed.close()
+
     def test_whole_card_effects_precede_every_crisp_face(self):
         for background in ("#f8fafc", "#1c2337"):
             with Image.new("RGB", (1200, 480), background) as image:

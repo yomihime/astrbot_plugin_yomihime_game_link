@@ -260,7 +260,7 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
                 if g.category == "savage"
             )
         )
-        self.assertEqual(len(self.calls), 10)
+        self.assertEqual(len(self.calls), 5)
         count = len(self.calls)
         cached = await self.run_history()
         self.assertEqual(len(self.calls), count)
@@ -617,6 +617,70 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requested(self.calls)), 111)
         self.assertTrue(result.catalog_complete)
 
+    async def test_denied_or_cancelled_parallel_reads_drain_before_history(self):
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled):
+                entered = asyncio.Event()
+                release = asyncio.Event()
+                started, ended = [], []
+
+                async def lookup(query):
+                    first = not started
+                    started.append(query.key)
+                    if len(started) == 3:
+                        entered.set()
+                    try:
+                        if first:
+                            await release.wait()
+                            raise PermissionError("synthetic revocation")
+                        await asyncio.Future()
+                    finally:
+                        ended.append(query.key)
+
+                self.scope.cache.lookup = lookup
+                task = asyncio.create_task(self.run_history())
+                try:
+                    async with asyncio.timeout(1):
+                        await entered.wait()
+                    if cancelled:
+                        task.cancel()
+                    else:
+                        release.set()
+                    with self.assertRaises(
+                        asyncio.CancelledError if cancelled else PermissionError
+                    ):
+                        await task
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                self.assertEqual(len(started), 3)
+                self.assertCountEqual(started, ended)
+                self.assertFalse(self.calls)
+                self.assertEqual(self.operations["put"], 0)
+
+    async def test_unreadable_pack_is_fetched_but_never_overwritten(self):
+        lookup = self.scope.cache.lookup
+        put = self.scope.cache.put
+        failed, saved = [], []
+
+        async def fail_one(query):
+            if not failed:
+                failed.append(query.key)
+                raise OSError("synthetic backend failure")
+            return await lookup(query)
+
+        async def observe(key, *args, **kwargs):
+            saved.append(key)
+            return await put(key, *args, **kwargs)
+
+        self.scope.cache.lookup = fail_one
+        self.scope.cache.put = observe
+        result = await self.run_history()
+        self.assertTrue(result.catalog_complete)
+        self.assertEqual(len(self.requested(self.calls)), 111)
+        self.assertTrue(saved)
+        self.assertNotIn(failed[0], saved)
+
     async def test_writing_stall_is_after_all_http_and_keeps_returned_rows(self):
         async def immediate_miss(query):
             return CacheLookup(CacheLookupStatus.MISS)
@@ -644,7 +708,7 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
             controlled_timeout,
         ):
             result = await self.run_history()
-        self.assertEqual(attempts, [10])
+        self.assertEqual(attempts, [5])
         self.assertEqual(len(self.requested(self.calls)), 111)
         self.assertTrue(any(row.query_state == "record" for row in result.rankings))
         self.assertTrue(any("保存" in warning for warning in result.catalog_warnings))

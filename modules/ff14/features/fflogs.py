@@ -6,6 +6,7 @@ import asyncio
 import json
 import math
 import re
+from collections import deque
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 from decimal import Decimal
@@ -63,6 +64,7 @@ from .fflogs_catalog import (
     MAX_SERVER_PAGES,
     FFLogsCatalog,
     FFLogsGraphQLError,
+    FFLogsResponseTooLarge,
     match_servers,
     normalized_encounter_name,
     parse_graphql_envelope,
@@ -95,7 +97,9 @@ MAX_HTML_TAGS = 20_000
 METADATA_DEADLINE_SECONDS = 5
 METADATA_CACHE_SECONDS = 900
 METADATA_FAILURE_CACHE_SECONDS = 60
-CATALOG_BATCH_SIZE = 12
+CATALOG_BATCH_SIZE = 24
+SMALL_CATALOG_BATCH_SIZE = 12
+HISTORY_CACHE_READERS = 3
 MAX_CHARACTER_ROWS = 40
 CATALOG_DIAGNOSTIC_BYTES = 16_384
 _NUMBER = re.compile(r"(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?\Z", re.ASCII)
@@ -485,8 +489,15 @@ class FFLogsCharacterLookup:
         fetch_stop = stop_at - write_reserve
         read_stop = min(fetch_stop, monotonic() + min(2, available * 0.1))
         read_started = monotonic()
-        if cache is not None:
-            for index, group in enumerate(packs):
+        pending_reads = iter(enumerate(packs))
+        savage_keys = {
+            _target_key(target, character.metric)
+            for target in targets
+            if target[2] == "savage"
+        }
+
+        async def read_packs():
+            for index, group in pending_reads:
                 active()
                 if monotonic() >= read_stop:
                     break
@@ -495,6 +506,9 @@ class FFLogsCharacterLookup:
                         lookup = await cache.lookup(
                             CacheQuery(cache_pack_key(identity, group))
                         )
+                    active()
+                    if monotonic() >= read_stop:
+                        return
                     snapshots, selections, times = {}, {}, {}
                     if (
                         lookup.status is CacheLookupStatus.HIT
@@ -511,26 +525,35 @@ class FFLogsCharacterLookup:
                                 )
                                 or len({row.encounter_id for row in selection.rows})
                                 != len(selection.rows)
-                                or any(
-                                    target[2] == "savage" and selection.size != 8
-                                    for target in targets
-                                    if _target_key(target, character.metric) == key
-                                )
+                                or (key in savage_keys and selection.size != 8)
                             ):
                                 raise FFLogsPayloadError("history pack selection")
                     loaded[index] = snapshots
                     cached.update(selections)
                     dates.update(times)
                 except CacheUnavailable:
-                    loaded[index] = {}
+                    continue
                 except (PermissionError, ServiceUnavailable, OperationTimeout):
                     raise
                 except TimeoutError:
                     break
                 except Exception:
-                    # Corrupt/oversize codecs and ordinary storage failures are misses.
-                    loaded[index] = {}
+                    # Fetch fresh rows, but do not overwrite unverified siblings.
+                    continue
                 active()
+
+        if cache is not None:
+            readers = [
+                asyncio.create_task(read_packs())
+                for _ in range(min(HISTORY_CACHE_READERS, len(packs)))
+            ]
+            try:
+                await asyncio.gather(*readers)
+            finally:
+                for reader in readers:
+                    if not reader.done():
+                        reader.cancel()
+                await asyncio.gather(*readers, return_exceptions=True)
         summary["read_ms"] = max(0, int((monotonic() - read_started) * 1000))
         pairs = tuple(key for key in keys if key in eligible and key not in cached)
         fetch_started = monotonic()
@@ -825,8 +848,13 @@ class FFLogsCharacterLookup:
                     failures.source_error(error, started=started)
                 if error.status_code in (401, 403):
                     raise PermissionError() from None
-                if error.status_code == 429:
+                if error.code == "rate_limited" or error.status_code == 429:
                     limited = True
+                elif len(keys) > SMALL_CATALOG_BATCH_SIZE and (
+                    error.code in {"request_too_large", "response_too_large"}
+                    or error.status_code == 413
+                ):
+                    return None
                 return {key: "request_failed" for key in keys}
             except (FFLogsGraphQLError, FFLogsPayloadError) as error:
                 if failures is not None:
@@ -837,6 +865,11 @@ class FFLogsCharacterLookup:
                         status=status,
                         started=started,
                     )
+                if (
+                    isinstance(error, FFLogsResponseTooLarge)
+                    and len(keys) > SMALL_CATALOG_BATCH_SIZE
+                ):
+                    return None
                 return {key: "request_failed" for key in keys}
             except OperationTimeout:
                 raise
@@ -895,17 +928,22 @@ class FFLogsCharacterLookup:
                     result[key] = "invalid"
             return result
 
-        pending = iter(
+        pending = deque(
             pairs[i : i + CATALOG_BATCH_SIZE]
             for i in range(0, len(pairs), CATALOG_BATCH_SIZE)
         )
         active_count = 0
+        small_batches = False
 
         async def worker():
-            nonlocal hidden, active_count
-            for batch_keys in pending:
+            nonlocal hidden, active_count, small_batches
+            while pending:
                 if hidden or limited or monotonic() >= stop_at:
                     return
+                batch_keys = pending.popleft()
+                if small_batches and len(batch_keys) > SMALL_CATALOG_BATCH_SIZE:
+                    pending.appendleft(batch_keys[SMALL_CATALOG_BATCH_SIZE:])
+                    batch_keys = batch_keys[:SMALL_CATALOG_BATCH_SIZE]
                 active_count += 1
                 if summary is not None:
                     summary["batches_attempted"] = (
@@ -916,6 +954,13 @@ class FFLogsCharacterLookup:
                     )
                 try:
                     outcome = await batch(batch_keys)
+                    if outcome is None:
+                        # The transport or decoder rejected this batch's size.
+                        # Keep its actual failure if the deadline or quota stops the retry.
+                        outcomes.update(dict.fromkeys(batch_keys, "request_failed"))
+                        small_batches = True
+                        pending.appendleft(batch_keys)
+                        continue
                     outcomes.update(outcome)
                     hidden = hidden or any(
                         value == "hidden" for value in outcome.values()
