@@ -15,6 +15,7 @@ HISTORY_CACHE_TTL = 900
 MAX_CACHE_BYTES = 65_536
 MAX_CACHE_NODES = 512
 POLICY = "explicit-non-echo-partition-pack-v3"
+COMPLETE_PACK_VERSION = "fflogs-complete-slice-v1"
 
 
 def _digest(value):
@@ -72,6 +73,113 @@ def cache_packs(metadata, requested):
 
 def cache_pack_key(identity, planned):
     return "fflogs-history-pack-" + _digest([POLICY, identity, planned])
+
+
+def complete_packs(metadata, requested):
+    """Each slice has seven envelope nodes, nine per scope and seven per row."""
+    counts = {zone.zone_id: len(zone.encounters) for zone in metadata.zones}
+    groups, current, nodes = [], [], 7
+    for key in requested:
+        weight = 9 + 7 * counts[key[0]]
+        if weight + 7 > MAX_CACHE_NODES:
+            return ()
+        if nodes + weight > MAX_CACHE_NODES:
+            groups.append(tuple(current))
+            current, nodes = [], 7
+        current.append(key)
+        nodes += weight
+    if current:
+        groups.append(tuple(current))
+    return tuple(groups)
+
+
+def complete_pack_key(identity, planned):
+    return "fflogs-complete-" + _digest([COMPLETE_PACK_VERSION, identity, planned])
+
+
+def complete_payload(cache_key, planned, selections, dates):
+    entries = []
+    for key in planned:
+        rank = selections[key]
+        rows = [
+            [
+                row.encounter_id,
+                row.encounter_name,
+                str(row.rank_percent_exact)
+                if row.rank_percent_exact is not None
+                else None,
+                row.best_amount,
+                row.spec,
+                row.total_kills,
+            ]
+            for row in rank.rows
+        ]
+        entries.append(
+            [
+                _digest(key),
+                dates[key],
+                rank.metric,
+                rank.zone_id,
+                rank.difficulty_id,
+                rank.partition,
+                rank.size,
+                rows,
+            ]
+        )
+    value = {"version": COMPLETE_PACK_VERSION, "key": cache_key, "entries": entries}
+    _bounded(value)
+    return value
+
+
+def restore_complete_pack(payload, cache_key, planned):
+    value = _plain(payload)
+    _bounded(value)
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"version", "key", "entries"}
+        or value["version"] != COMPLETE_PACK_VERSION
+        or value["key"] != cache_key
+        or not isinstance(value["entries"], list)
+        or len(value["entries"]) != len(planned)
+    ):
+        raise FFLogsPayloadError("complete history slice identity")
+    selections, dates = {}, {}
+    for key, entry in zip(planned, value["entries"], strict=True):
+        if not isinstance(entry, list) or len(entry) != 8 or entry[0] != _digest(key):
+            raise FFLogsPayloadError("complete history entry")
+        _, fetched, metric, zone, difficulty, partition, size, rows = entry
+        if type(fetched) not in (float, int) or not 0 <= time() - fetched:
+            raise FFLogsPayloadError("complete history time")
+        if time() - fetched >= HISTORY_CACHE_TTL:
+            continue
+        if not isinstance(rows, list):
+            raise FFLogsPayloadError("complete history rows")
+        rankings = []
+        for row in rows:
+            if not isinstance(row, list) or len(row) != 6:
+                raise FFLogsPayloadError("complete history row")
+            encounter, name, percent, amount, spec, kills = row
+            rankings.append(
+                {
+                    "encounter": {"id": encounter, "name": name},
+                    "rankPercent": _restore_percent(percent),
+                    "bestAmount": amount,
+                    "bestSpec": spec,
+                    "totalKills": kills,
+                }
+            )
+        selection = parse_rankings(
+            {
+                "zone": zone,
+                "metric": metric,
+                "size": size,
+                "partition": partition,
+                "difficulty": difficulty,
+                "rankings": rankings,
+            }
+        )
+        selections[key], dates[key] = selection, fetched
+    return selections, dates
 
 
 def pack_payload(identity, snapshots, planned):
@@ -235,12 +343,16 @@ def restore_snapshot(payload):
             "totalKills",
         }:
             raise FFLogsPayloadError("history snapshot row")
-        raw = row["rankPercent"]
-        if raw is not None:
-            if type(raw) is not str or len(raw) > 132:
-                raise FFLogsPayloadError("history snapshot number")
-            try:
-                row["rankPercent"] = Decimal(raw)
-            except InvalidOperation:
-                raise FFLogsPayloadError("history snapshot number") from None
+        row["rankPercent"] = _restore_percent(row["rankPercent"])
     return parse_rankings(selection), fetched
+
+
+def _restore_percent(raw):
+    if raw is None:
+        return None
+    if type(raw) is not str or len(raw) > 132:
+        raise FFLogsPayloadError("history snapshot number")
+    try:
+        return Decimal(raw)
+    except InvalidOperation:
+        raise FFLogsPayloadError("history snapshot number") from None

@@ -424,7 +424,11 @@ class FFLogsCharacterLookup:
             HISTORY_CACHE_TTL,
             cache_pack_key,
             cache_packs,
+            complete_pack_key,
+            complete_packs,
+            complete_payload,
             pack_payload,
+            restore_complete_pack,
             restore_pack,
             snapshot_payload,
         )
@@ -441,7 +445,13 @@ class FFLogsCharacterLookup:
             if target[3] is not None
         }
         cache = getattr(scope, "cache", None)
-        packs = cache_packs(metadata, tuple(key for key in keys if key in eligible))
+        requested = tuple(key for key in keys if key in eligible)
+        packs = cache_packs(metadata, requested)
+        # Twelve legacy packs fit the measured cold-read window on the Host.
+        # Keep smaller catalogs on the existing format without an extra lookup.
+        compact = complete_packs(metadata, requested) if len(packs) > 12 else ()
+        if len(compact) >= len(packs):
+            compact = ()
         cached, dates, loaded = {}, {}, {}
         fresh, acquired, attempted = {}, {}, set()
         summary = {
@@ -489,34 +499,40 @@ class FFLogsCharacterLookup:
         fetch_stop = stop_at - write_reserve
         read_stop = min(fetch_stop, monotonic() + min(2, available * 0.1))
         read_started = monotonic()
-        pending_reads = iter(enumerate(packs))
         savage_keys = {
             _target_key(target, character.metric)
             for target in targets
             if target[2] == "savage"
         }
 
-        async def read_packs():
+        async def read_packs(pending_reads, compact_format):
+            restored = False
             for index, group in pending_reads:
                 active()
                 if monotonic() >= read_stop:
                     break
+                cache_key = (complete_pack_key if compact_format else cache_pack_key)(
+                    identity, group
+                )
                 try:
                     async with asyncio.timeout(max(0, read_stop - monotonic())):
-                        lookup = await cache.lookup(
-                            CacheQuery(cache_pack_key(identity, group))
-                        )
+                        lookup = await cache.lookup(CacheQuery(cache_key))
                     active()
                     if monotonic() >= read_stop:
-                        return
+                        break
                     snapshots, selections, times = {}, {}, {}
                     if (
                         lookup.status is CacheLookupStatus.HIT
                         and lookup.entry.expires_at.timestamp() > time()
                     ):
-                        snapshots, selections, times = restore_pack(
-                            lookup.entry.payload, identity, group
-                        )
+                        if compact_format:
+                            selections, times = restore_complete_pack(
+                                lookup.entry.payload, cache_key, group
+                            )
+                        else:
+                            snapshots, selections, times = restore_pack(
+                                lookup.entry.payload, identity, group
+                            )
                         for key, selection in selections.items():
                             if (
                                 not _selection_scope_matches(selection, key)
@@ -528,9 +544,12 @@ class FFLogsCharacterLookup:
                                 or (key in savage_keys and selection.size != 8)
                             ):
                                 raise FFLogsPayloadError("history pack selection")
-                    loaded[index] = snapshots
-                    cached.update(selections)
-                    dates.update(times)
+                        restored = True
+                    if not compact_format:
+                        loaded[index] = snapshots
+                    for key, selection in selections.items():
+                        if key not in dates or times[key] > dates[key]:
+                            cached[key], dates[key] = selection, times[key]
                 except CacheUnavailable:
                     continue
                 except (PermissionError, ServiceUnavailable, OperationTimeout):
@@ -541,11 +560,13 @@ class FFLogsCharacterLookup:
                     # Fetch fresh rows, but do not overwrite unverified siblings.
                     continue
                 active()
+            return restored
 
-        if cache is not None:
+        async def read_groups(groups, compact_format):
+            pending_reads = iter(groups)
             readers = [
-                asyncio.create_task(read_packs())
-                for _ in range(min(HISTORY_CACHE_READERS, len(packs)))
+                asyncio.create_task(read_packs(pending_reads, compact_format))
+                for _ in range(min(HISTORY_CACHE_READERS, len(groups)))
             ]
             try:
                 await asyncio.gather(*readers)
@@ -554,6 +575,22 @@ class FFLogsCharacterLookup:
                     if not reader.done():
                         reader.cancel()
                 await asyncio.gather(*readers, return_exceptions=True)
+
+        compact_hit = False
+        compact_covered = set()
+        if cache is not None:
+            if compact:
+                # The first slice is published last. One miss reaches legacy packs.
+                compact_hit = await read_packs(iter(((0, compact[0]),)), True)
+                if compact_hit:
+                    await read_groups(tuple(enumerate(compact[1:], 1)), True)
+                    compact_covered.update(cached)
+            legacy = tuple(
+                (i, group)
+                for i, group in enumerate(packs)
+                if any(key not in cached for key in group)
+            )
+            await read_groups(legacy, False)
         summary["read_ms"] = max(0, int((monotonic() - read_started) * 1000))
         pairs = tuple(key for key in keys if key in eligible and key not in cached)
         fetch_started = monotonic()
@@ -607,14 +644,53 @@ class FFLogsCharacterLookup:
         outcomes = {**cached, **fresh}
         used_dates = {**dates, **acquired}
         unsaved = set()
+        write_started = monotonic()
+        saved = set()
+        if (
+            cache is not None
+            and compact
+            and compact_covered != eligible
+            and all(
+                key in used_dates and not isinstance(outcomes[key], str)
+                for key in eligible
+            )
+        ):
+            # Each complete slice covers every declared member. It cannot discard
+            # an unread sibling. Legacy packs remain untouched on this path.
+            expires_at = max(used_dates[key] for key in eligible) + HISTORY_CACHE_TTL
+            for group in (*compact[1:], compact[0]):
+                if group != compact[0] and all(key in compact_covered for key in group):
+                    continue
+                active()
+                if monotonic() >= stop_at:
+                    break
+                try:
+                    cache_key = complete_pack_key(identity, group)
+                    payload = complete_payload(cache_key, group, outcomes, used_dates)
+                    # The container lives until its newest member expires.
+                    # Restore independently checks every original acquisition time.
+                    ttl = expires_at - time()
+                    if ttl <= 0:
+                        break
+                    async with asyncio.timeout(max(0, stop_at - monotonic())):
+                        await cache.put(cache_key, payload, ttl_seconds=ttl)
+                except CacheUnavailable:
+                    break
+                except (PermissionError, ServiceUnavailable, OperationTimeout):
+                    raise
+                except Exception:
+                    break
+            else:
+                saved.update(eligible)
+            active()
         prepared = {}
         for key, selection in good.items():
+            if key in saved:
+                continue
             try:
                 prepared[key] = snapshot_payload(selection, fetched_at=acquired[key])
             except (FFLogsPayloadError, ValueError, TypeError):
                 unsaved.add(key)
-        write_started = monotonic()
-        saved = set()
         for index, group in enumerate(packs):
             updates = {key: prepared[key] for key in group if key in prepared}
             if not updates:

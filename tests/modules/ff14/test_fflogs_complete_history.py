@@ -7,7 +7,7 @@ import io
 import json
 import unittest
 from dataclasses import replace
-from time import monotonic
+from time import monotonic, time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -23,7 +23,19 @@ from ygl_test_subject.modules.ff14.features.fflogs import (
 )
 from ygl_test_subject.modules.ff14.features.fflogs_catalog import select_character_zones
 from ygl_test_subject.modules.ff14.features.fflogs_evidence import project
-from ygl_test_subject.modules.ff14.features.fflogs_models import EncounterRecord
+from ygl_test_subject.modules.ff14.features.fflogs_history_cache import (
+    HISTORY_CACHE_TTL,
+    _plain,
+    complete_pack_key,
+    complete_packs,
+    history_identity,
+    restore_complete_pack,
+)
+from ygl_test_subject.modules.ff14.features.fflogs_models import (
+    EncounterRecord,
+    FFLogsPayloadError,
+    PartitionRecord,
+)
 from ygl_test_subject.presentation.command_card import CommandCardRenderer
 
 from tests.integration import test_bound_public_contracts as bound_fixture
@@ -44,6 +56,172 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
     run_history = explicit_fixture.ExplicitHistoryTests.run_history
     requested = explicit_fixture.ExplicitHistoryTests.requested
     planned_packs = explicit_fixture.ExplicitHistoryTests.planned_packs
+
+    def large_catalog(self):
+        self.metadata = replace(
+            self.metadata,
+            zones=(
+                *self.metadata.zones[:3],
+                *(
+                    replace(
+                        zone,
+                        partitions=tuple(
+                            PartitionRecord(p, f"标准阵容构成 (Synthetic {p})", p == 1)
+                            for p in range(1, 17)
+                        ),
+                    )
+                    for zone in self.metadata.zones[3:]
+                ),
+            ),
+        )
+        keys = tuple(key for group in self.planned_packs() for key in group)
+        self.assertEqual(len(keys), 163)
+        identity = history_identity(
+            self.source,
+            self.role,
+            explicit_fixture.VARIABLES,
+            self.metadata,
+            self.owner,
+        )
+        groups = complete_packs(self.metadata, keys)
+        return [(complete_pack_key(identity, group), group) for group in groups]
+
+    async def test_complete_slices_migrate_existing_legacy_without_fetch_or_renewal(
+        self,
+    ):
+        compact = self.large_catalog()
+        lookup, put = self.scope.cache.lookup, self.scope.cache.put
+        reads, writes, payloads = [], [], {}
+
+        async def observe_read(query):
+            reads.append(query.key)
+            return await lookup(query)
+
+        async def observe_write(key, payload, **kwargs):
+            writes.append(key)
+            payloads[key] = payload
+            return await put(key, payload, **kwargs)
+
+        self.scope.cache = SimpleNamespace(lookup=observe_read, put=observe_write)
+        with patch(
+            "ygl_test_subject.modules.ff14.features.fflogs_history_cache.complete_packs",
+            return_value=(),
+        ):
+            original = await self.collect()
+        self.assertTrue(original.catalog_complete)
+        legacy_dates = sorted(
+            entry["snapshot"]["fetched_at"]
+            for payload in payloads.values()
+            for entry in payload["entries"]
+        )
+        self.calls.clear()
+        writes.clear()
+        migrated = await self.collect()
+        self.assertEqual(migrated.groups, original.groups)
+        self.assertEqual(migrated.history_cache_hits, 163)
+        self.assertFalse(self.calls)
+        self.assertEqual(set(writes), {key for key, _ in compact})
+        self.assertEqual(writes[-1], compact[0][0])
+        self.assertEqual(
+            sorted(
+                entry[1] for key, _ in compact for entry in payloads[key]["entries"]
+            ),
+            legacy_dates,
+        )
+        reads.clear()
+        writes.clear()
+        hot = await self.collect()
+        self.assertEqual(hot.groups, original.groups)
+        self.assertCountEqual(reads, [key for key, _ in compact])
+        self.assertFalse(self.calls)
+        self.assertFalse(writes)
+        first, planned = compact[0]
+        raw = _plain(payloads[first])
+        raw["entries"][0][1] = time() - HISTORY_CACHE_TTL
+        values, dates = restore_complete_pack(raw, first, planned)
+        self.assertNotIn(planned[0], values)
+        self.assertNotIn(planned[0], dates)
+        self.assertEqual(len(values), len(planned) - 1)
+        raw["entries"].reverse()
+        with self.assertRaises(FFLogsPayloadError):
+            restore_complete_pack(raw, first, planned)
+
+    async def test_compact_miss_and_bad_slice_use_legacy_or_only_fetch_missing_members(
+        self,
+    ):
+        compact = self.large_catalog()
+        original = await self.collect()
+        self.assertTrue(original.catalog_complete)
+        self.calls.clear()
+        key, members = compact[1]
+        lookup = self.scope.cache.lookup
+
+        async def corrupt(query):
+            result = await lookup(query)
+            if query.key != key:
+                return result
+            self.assertIs(result.status, CacheLookupStatus.HIT)
+            return SimpleNamespace(
+                status=result.status,
+                entry=SimpleNamespace(
+                    expires_at=result.entry.expires_at, payload={"version": "invalid"}
+                ),
+            )
+
+        self.scope.cache.lookup = corrupt
+        repaired = await self.collect()
+        self.assertEqual(repaired.groups, original.groups)
+        self.assertEqual(repaired.history_cache_hits, 163 - len(members))
+        self.assertEqual(
+            set(self.requested(self.calls)), {(k[0], k[2]) for k in members}
+        )
+        self.calls.clear()
+        self.scope.cache.lookup = lookup
+        self.assertEqual((await self.collect()).history_cache_hits, 163)
+        self.assertFalse(self.calls)
+        self.contract.issuer.release(self.owner)
+        with self.assertRaises((PermissionError, RuntimeError)):
+            await self.collect()
+        self.assertFalse(self.calls)
+
+    async def test_interrupted_slice_publication_remains_readable_from_legacy(self):
+        compact = self.large_catalog()
+        put = self.scope.cache.put
+        seen = []
+
+        async def fail_second_slice(key, payload, **kwargs):
+            seen.append(key)
+            if key == compact[2][0]:
+                raise OSError("synthetic write failure")
+            return await put(key, payload, **kwargs)
+
+        self.scope.cache.put = fail_second_slice
+        original = await self.collect()
+        self.assertTrue(original.catalog_complete)
+        self.assertNotIn(compact[0][0], seen)
+        self.assertIn(compact[1][0], seen)
+        self.calls.clear()
+        self.scope.cache.put = put
+        migrated = await self.collect()
+        self.assertEqual(migrated.groups, original.groups)
+        self.assertEqual(migrated.history_cache_hits, 163)
+        self.assertFalse(self.calls)
+
+    async def test_revoked_during_compact_write_does_not_publish_or_fall_back(self):
+        compact = self.large_catalog()
+        put = self.scope.cache.put
+        writes = []
+
+        async def revoke_before_second_write(key, payload, **kwargs):
+            writes.append(key)
+            if key == compact[2][0]:
+                self.contract.issuer.release(self.owner)
+            return await put(key, payload, **kwargs)
+
+        self.scope.cache.put = revoke_before_second_write
+        with self.assertRaises(PermissionError):
+            await self.collect()
+        self.assertEqual(writes, [compact[1][0], compact[2][0]])
 
     async def test_optional_menu_overlaps_history_and_reports_cache_hit(self):
         from tests.modules.ff14.test_duty_order import payload
