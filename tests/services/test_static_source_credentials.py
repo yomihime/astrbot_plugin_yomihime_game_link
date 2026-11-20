@@ -38,7 +38,9 @@ class StaticCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.calls = []
         self.transport = AioHttpTransport()
 
-        async def send(method, url, body, headers, timeout_seconds, maximum):
+        async def send(
+            method, url, body, headers, timeout_seconds, maximum, *, source_id
+        ):
             self.calls.append((method, str(url), body, headers))
             return HttpResponse(
                 200,
@@ -159,7 +161,9 @@ class StaticCredentialsTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_json_equivalent_secret_spellings_are_redacted_after_decoding(self):
-        async def send(method, url, body, headers, timeout_seconds, maximum):
+        async def send(
+            method, url, body, headers, timeout_seconds, maximum, *, source_id
+        ):
             # These are distinct valid JSON spellings of the injected secret.
             escaped = "".join(f"\\u{ord(char):04x}" for char in self.token)
             mixed = self.token[:5] + "".join(
@@ -192,7 +196,9 @@ class StaticCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decoded["business"], {"id": "123", "score": 13})
 
     async def _fetch_response_bytes(self, payload, headers=None, *, http=None):
-        async def send(method, url, body, request_headers, timeout_seconds, maximum):
+        async def send(
+            method, url, body, request_headers, timeout_seconds, maximum, *, source_id
+        ):
             return HttpResponse(200, headers or {}, payload)
 
         self.transport._send = send
