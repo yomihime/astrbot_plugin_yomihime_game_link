@@ -58,11 +58,13 @@ class FFLogsToolHostTests(unittest.IsolatedAsyncioTestCase):
     call = tools_fixture.LLMToolTests.call
 
     async def start_logs(self, *, configured=True, count=1):
-        environment = patch.dict(
-            os.environ, {"YGL_SECRET_KEY": base64.b64encode(bytes(range(32))).decode()}
-        )
-        environment.start()
-        self.addCleanup(environment.stop)
+        name = "YGL_SECRET_KEY"
+        previous = os.environ.get(name)
+        if previous is None:
+            self.addCleanup(os.environ.pop, name, None)
+        else:
+            self.addCleanup(os.environ.__setitem__, name, previous)
+        os.environ[name] = base64.b64encode(bytes(range(32))).decode()
         # Borrow the unchanged publisher fixture with a credential-capable
         # transport constructor. SourceHttp captures the same channel at init;
         # adding one afterward would not establish that proof.
