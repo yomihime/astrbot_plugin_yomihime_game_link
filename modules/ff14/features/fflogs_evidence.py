@@ -8,9 +8,10 @@ import json
 import re
 from decimal import Decimal
 from secrets import token_hex
-from time import monotonic
+from time import monotonic, monotonic_ns
 
 from ....yomihime_game_link_sdk.errors import ServiceUnavailable
+from .fflogs_failures import STAGE_MESSAGES
 
 MARKER = "FF14_LOGS_EVIDENCE"
 MAX_BYTES = 512 * 1024
@@ -60,6 +61,7 @@ class RequestMetrics:
         self.started = monotonic()
         self.operations = {}
         self.evidence = None
+        self.history_timing = None
 
     def _entry(self, operation):
         return self.operations.setdefault(
@@ -118,12 +120,45 @@ class RequestMetrics:
 
         return ObservedHttp()
 
-    def finish(self):
+    async def flush_result(self, *, outcome, stages):
+        """Observe both completed flushes, including every awaited SDK authority check."""
+        before = monotonic_ns()
+        first_count = await self.evidence.flush()
+        first_us = (monotonic_ns() - before) // 1000
+        self.finish(
+            outcome=outcome,
+            stages=stages,
+            diagnostic_ms=self.evidence.projection_ms + first_us // 1000,
+            evidence_flush_us=first_us,
+            evidence_events=first_count,
+        )
+        # The sole remaining event is submitted directly. Core times that declared
+        # emit across both authority checks, without a third diagnostic call.
+        await self.evidence.flush_summary()
+
+    def finish(
+        self,
+        *,
+        outcome="unknown",
+        stages=None,
+        diagnostic_ms=0,
+        evidence_flush_us=None,
+        evidence_events=None,
+    ):
         if self.evidence is not None:
             self.evidence.observe(
                 "FF14RequestSummary",
                 {
                     "kind": "module_source_http_fetch",
+                    "stage_ms": stages or {},
+                    "diagnostic_ms": diagnostic_ms,
+                    "evidence_flush_us": evidence_flush_us,
+                    "evidence_events": evidence_events,
+                    "history": self.history_timing,
+                    "cumulative_http_ms": sum(
+                        row["elapsed_ms"] for row in self.operations.values()
+                    ),
+                    "outcome": outcome,
                     "operations": list(self.operations.values()),
                     "elapsed_ms": max(0, int((monotonic() - self.started) * 1000)),
                     "underlying_http_cache": "unknown",
@@ -343,7 +378,32 @@ def project(operation, payload):
         def count(value):
             return value if type(value) is int and 0 <= value <= 2147483647 else 0
 
+        from .diagnostic_declarations import HISTORY_TIMING_FIELDS
+
+        optional = {
+            key: count(payload[key])
+            for key in ("evidence_flush_us", "evidence_events")
+            if type(payload.get(key)) is int
+        }
+        history = payload.get("history")
+        if isinstance(history, dict):
+            optional["history"] = {
+                key: count(history[key])
+                for key in HISTORY_TIMING_FIELDS
+                if key in history
+            }
         return {
+            **optional,
+            "stage_ms": {
+                stage: count(value)
+                for stage, value in (payload.get("stage_ms") or {}).items()
+                if stage in STAGE_MESSAGES
+            },
+            "diagnostic_ms": count(payload.get("diagnostic_ms")),
+            "cumulative_http_ms": count(payload.get("cumulative_http_ms")),
+            "outcome": payload.get("outcome")
+            if payload.get("outcome") in {"success", "partial_success", "error"}
+            else "unknown",
             "kind": "module_source_http_fetch",
             "operations": [
                 {
@@ -752,6 +812,8 @@ class Evidence:
         self.source = source
         self.correlation = token_hex(12)
         self.bytes = 0
+        self.request_summary_sent = False
+        self.projection_ms = 0
         self.chunks = 0
         self.limited = False
         self.low_chunks = 0
@@ -761,6 +823,7 @@ class Evidence:
         self.sentinel = False
 
     def observe(self, operation, payload, *, status=200, cached=False, filters=None):
+        started = monotonic()
         try:
             self._observe(
                 operation, payload, status=status, cached=cached, filters=filters
@@ -768,9 +831,14 @@ class Evidence:
         except Exception:
             # Diagnostic failures never affect the source business result.
             return
+        finally:
+            self.projection_ms += int((monotonic() - started) * 1000)
 
     def _observe(self, operation, payload, *, status, cached, filters):
-        if self.limited or self._diagnostics is None:
+        summary = operation == "FF14RequestSummary"
+        if summary and self.request_summary_sent:
+            return
+        if (self.limited and not summary) or self._diagnostics is None:
             return
         if operation not in OPERATIONS or self.source not in {
             "fflogs_public_cn",
@@ -795,15 +863,23 @@ class Evidence:
         high = operation == "FF14HistorySummary"
         if high and (len(pieces) > SUMMARY_CHUNKS or self.summary_count >= 2):
             return
-        low_limited = not high and (
-            self.low_limited or self.low_chunks + len(pieces) > LOW_CHUNKS
+        low_limited = (
+            not summary
+            and not high
+            and (self.low_limited or self.low_chunks + len(pieces) > LOW_CHUNKS)
         )
+        # Reserve one chunk for the compact terminal request summary.
+        chunk_limit = MAX_CHUNKS - int(not summary and not self.request_summary_sent)
+        byte_limit = MAX_BYTES - (CHUNK_BYTES if chunk_limit < MAX_CHUNKS else 0)
         truncated = (
             projection_limited
-            or self.bytes + len(body) > MAX_BYTES
-            or self.chunks + len(pieces) > MAX_CHUNKS - int(not self.sentinel)
+            or self.bytes + len(body) > byte_limit
+            or self.chunks + len(pieces)
+            > chunk_limit - int(not self.sentinel and not summary)
             or low_limited
         )
+        if summary and (truncated or len(pieces) != 1):
+            return
         if truncated:
             if low_limited:
                 self.low_limited = True
@@ -813,15 +889,17 @@ class Evidence:
             self.sentinel = True
             if not low_limited:
                 self.limited = True
-        if self.chunks >= MAX_CHUNKS:
+        if self.chunks >= chunk_limit:
             return
-        if self.bytes + sum(len(piece) for piece in pieces) > MAX_BYTES:
+        if self.bytes + sum(len(piece) for piece in pieces) > byte_limit:
             self.limited = True
             return
         self.bytes += sum(len(piece) for piece in pieces)
         self.chunks += len(pieces)
         if not truncated:
-            if high:
+            if summary:
+                self.request_summary_sent = True
+            elif high:
                 self.high_chunks += len(pieces)
                 self.summary_count += 1
             else:
@@ -863,14 +941,22 @@ class Evidence:
             )
         )
 
+    async def _emit(self, operation, payload):
+        try:
+            await self._diagnostics.emit(operation, payload)
+        except (PermissionError, TimeoutError, ServiceUnavailable):
+            raise
+        except Exception:
+            # Optional telemetry failures do not change an authorized result.
+            pass
+
+    async def flush_summary(self):
+        if self._pending:
+            operation, payload = self._pending.pop()
+            await self._emit(operation, payload)
+
     async def flush(self):
-        # No rebind, logging backchannel, or stored invocation beyond this call.
         pending, self._pending = self._pending, []
         for operation, payload in pending:
-            try:
-                await self._diagnostics.emit(operation, payload)
-            except (PermissionError, TimeoutError, ServiceUnavailable):
-                raise
-            except Exception:
-                # Optional diagnostics must not replace a validated result.
-                continue
+            await self._emit(operation, payload)
+        return len(pending)

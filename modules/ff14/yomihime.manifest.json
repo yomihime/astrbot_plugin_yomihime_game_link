@@ -2934,7 +2934,122 @@
                   "module_source_http_fetch"
                 ]
               },
+              "s7": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "s6": {
+                "type": "object",
+                "properties": {
+                  "realm_directory": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "authentication": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "server_directory": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "character_query": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "ranking_schema": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "ranking_metadata": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "ranking_history": {
+                    "$ref": "#/$defs/s7"
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
               "s8": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 64
+              },
+              "s9": {
+                "type": "object",
+                "properties": {
+                  "slice_reads": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "slice_hits": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "slice_invalid": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "slice_decode_us": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "compact_read_mask": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "compact_hit_mask": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "legacy_read_mask": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "legacy_hit_mask": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "refresh_wait_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "planned": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "eligible": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "cache_hit": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "attempted": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "not_queried": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "read_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "ranking_fetch_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "duty_order_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "fetch_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "write_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "total_ms": {
+                    "$ref": "#/$defs/s7"
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "s10": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "success",
+                  "partial_success",
+                  "error",
+                  "unknown"
+                ]
+              },
+              "s13": {
                 "type": "string",
                 "maxLength": 160,
                 "enum": [
@@ -2951,12 +3066,7 @@
                   "FF14CatalogCharacter"
                 ]
               },
-              "s9": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 2147483647
-              },
-              "s10": {
+              "s14": {
                 "type": "string",
                 "maxLength": 160,
                 "enum": [
@@ -2965,29 +3075,29 @@
                   "unknown"
                 ]
               },
-              "s7": {
+              "s12": {
                 "type": "object",
                 "properties": {
                   "operation": {
-                    "$ref": "#/$defs/s8"
+                    "$ref": "#/$defs/s13"
                   },
                   "attempts": {
-                    "$ref": "#/$defs/s9"
+                    "$ref": "#/$defs/s7"
                   },
                   "returned": {
-                    "$ref": "#/$defs/s9"
+                    "$ref": "#/$defs/s7"
                   },
                   "failed": {
-                    "$ref": "#/$defs/s9"
+                    "$ref": "#/$defs/s7"
                   },
                   "cancelled": {
-                    "$ref": "#/$defs/s9"
+                    "$ref": "#/$defs/s7"
                   },
                   "elapsed_ms": {
-                    "$ref": "#/$defs/s9"
+                    "$ref": "#/$defs/s7"
                   },
                   "cache": {
-                    "$ref": "#/$defs/s10"
+                    "$ref": "#/$defs/s14"
                   }
                 },
                 "required": [
@@ -3001,21 +3111,21 @@
                 ],
                 "additionalProperties": false
               },
-              "s6": {
+              "s11": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/s7"
+                  "$ref": "#/$defs/s12"
                 },
                 "maxItems": 11
               },
-              "s11": {
+              "s15": {
                 "type": "string",
                 "maxLength": 160,
                 "enum": [
                   "unknown"
                 ]
               },
-              "s12": {
+              "s16": {
                 "type": "string",
                 "maxLength": 160,
                 "enum": [
@@ -3028,24 +3138,49 @@
                   "kind": {
                     "$ref": "#/$defs/s5"
                   },
-                  "operations": {
+                  "stage_ms": {
                     "$ref": "#/$defs/s6"
                   },
-                  "elapsed_ms": {
+                  "cumulative_http_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "diagnostic_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "evidence_flush_us": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "evidence_events": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "history": {
                     "$ref": "#/$defs/s9"
                   },
-                  "underlying_http_cache": {
+                  "outcome": {
+                    "$ref": "#/$defs/s10"
+                  },
+                  "operations": {
                     "$ref": "#/$defs/s11"
+                  },
+                  "elapsed_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "underlying_http_cache": {
+                    "$ref": "#/$defs/s15"
                   },
                   "host_oauth": {
-                    "$ref": "#/$defs/s12"
+                    "$ref": "#/$defs/s16"
                   },
                   "network_attempts": {
-                    "$ref": "#/$defs/s11"
+                    "$ref": "#/$defs/s15"
                   }
                 },
                 "required": [
                   "kind",
+                  "stage_ms",
+                  "cumulative_http_ms",
+                  "diagnostic_ms",
+                  "outcome",
                   "operations",
                   "elapsed_ms",
                   "underlying_http_cache",

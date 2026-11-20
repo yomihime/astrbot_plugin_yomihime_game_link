@@ -157,6 +157,25 @@ class DutyOrderTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((await client.load(http)).complete)
         self.assertEqual(len(http.requests), 1)
 
+    async def test_optional_cached_source_failure_preserves_verified_order(self):
+        from yomihime_game_link_sdk import AccessDenied
+
+        client, http = DutyOrderCatalog(), Http()
+        verified = await client.load(http)
+        self.assertTrue(verified.complete)
+
+        async def unavailable(source):
+            raise OSError("temporary source budget read failure")
+
+        async def revoked(source):
+            raise AccessDenied("source_revoked")
+
+        self.assertFalse((await client.load(http, check_source=unavailable)).complete)
+        with self.assertRaises(AccessDenied):
+            await client.load(http, check_source=revoked)
+        self.assertEqual(await client.load(http), verified)
+        self.assertEqual(len(http.requests), 1)
+
     async def test_failure_ttl_and_cancellation_are_bounded(self):
         client, http = DutyOrderCatalog(), Http(ValueError("synthetic"))
         with patch(

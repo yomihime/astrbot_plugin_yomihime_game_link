@@ -175,6 +175,43 @@ class HostLogLevelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([level for level, _ in levels], ["debug"])
         self.assertEqual(json.loads(levels[0][1].split(" ", 1)[1]), event)
 
+    async def test_both_flushes_include_authority_without_a_third_write(self):
+        fixture = bridge_fixture.DiagnosticBridgeTests()
+        fixture.setUp()
+        self.addCleanup(fixture.store.close)
+        sync = SyncDiagnostics()
+        token = sync.activate(fixture.view.invocation_id, "command")
+        self.addCleanup(sync.reset, token)
+        self.addCleanup(sync.close)
+        emit("core_start")
+        checks = []
+
+        async def current():
+            checks.append(1)
+            await asyncio.sleep(0.005)
+
+        port = BoundDiagnostics(
+            fixture.view, fixture.declarations, fixture.policy, fixture.store, current
+        )
+        metrics = RequestMetrics()
+        metrics.evidence = Evidence("fflogs_public_cn", port)
+        metrics.evidence.observe("FF14MetadataState", {"state": "verified_catalog"})
+        await metrics.flush_result(outcome="success", stages={})
+        events = fixture.store.snapshot()
+        self.assertEqual(
+            [event["event_id"] for event in events],
+            ["FF14MetadataState", "FF14RequestSummary"],
+        )
+        payload = events[-1]["payload"]["payload"]
+        self.assertEqual(payload["evidence_events"], 1)
+        self.assertGreaterEqual(payload["evidence_flush_us"], 10000)
+        timings = sync.snapshot()["attempts"][-1]["stage_timings"]
+        self.assertEqual(timings["diagnostic_emit.FF14RequestSummary"]["count"], 1)
+        self.assertGreaterEqual(
+            timings["diagnostic_emit.FF14RequestSummary"]["wall_us"], 10000
+        )
+        self.assertEqual(len(checks), 4)
+
     async def test_request_cancel_and_empty_cache_state_remain_safe_module_facts(self):
         fixture = bridge_fixture.DiagnosticBridgeTests()
         fixture.setUp()

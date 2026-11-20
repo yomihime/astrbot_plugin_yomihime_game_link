@@ -9,7 +9,7 @@ from types import MappingProxyType
 
 from ..core.contracts.diagnostics import DiagnosticLimitExceeded, diagnostic_payload
 from ..core.public_errors import public_boundary
-from ..infrastructure.sync_diagnostics import defer_failure_report
+from ..infrastructure.sync_diagnostics import defer_failure_report, measure_stage
 from ..yomihime_game_link_sdk.errors import (
     AccessDenied,
     OperationTimeout,
@@ -202,6 +202,15 @@ class BoundDiagnostics:
 
     @public_boundary("service")
     async def emit(self, event_id, payload):
+        declared = type(event_id) is str and event_id in self.__declarations
+        # Include authority checks on either side of the store, on the original
+        # await. An unchecked identifier must never become a trace field.
+        with measure_stage(
+            "diagnostic_emit", declaration=event_id if declared else None
+        ):
+            await self.__emit(event_id, payload)
+
+    async def __emit(self, event_id, payload):
         await self.__check()
         if (
             type(event_id) is not str
@@ -211,13 +220,14 @@ class BoundDiagnostics:
         ):
             raise AccessDenied()
         try:
-            self.__store.record(
-                self.__invocation,
-                event_id,
-                self.__declarations[event_id],
-                payload,
-                self.__policy,
-            )
+            with measure_stage("diagnostic_write"):
+                self.__store.record(
+                    self.__invocation,
+                    event_id,
+                    self.__declarations[event_id],
+                    payload,
+                    self.__policy,
+                )
         except Exception as error:
             await self.__check()
             if isinstance(

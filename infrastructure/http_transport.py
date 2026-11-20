@@ -24,6 +24,7 @@ from .http import (
     _AuthenticatedRequestProof,
 )
 from .sync_diagnostics import emit as diagnostic
+from .sync_diagnostics import measure_stage
 
 _RESPONSE_SECRET_MARKERS = (
     "auth",
@@ -131,6 +132,7 @@ class AioHttpTransport:
                 headers,
                 float(request.timeout_seconds),
                 request.max_response_bytes,
+                source_id=declaration.source_id,
             )
         except asyncio.CancelledError:
             diagnostic("transport_error", code="cancelled")
@@ -161,7 +163,14 @@ class AioHttpTransport:
             except Exception:
                 raise SourceHttpError("request_rejected") from None
             return await self._send(
-                "POST", url, body, headers, timeout_seconds, maximum
+                "POST",
+                url,
+                body,
+                headers,
+                timeout_seconds,
+                maximum,
+                source_id=request.source_id,
+                oauth=True,
             )
         except asyncio.CancelledError:
             raise
@@ -186,6 +195,9 @@ class AioHttpTransport:
         request_headers: dict[str, str],
         timeout_seconds: float,
         maximum: int,
+        *,
+        source_id: str,
+        oauth: bool = False,
     ) -> HttpResponse:
         session = await self._get_session()
         headers = dict(request_headers)
@@ -193,49 +205,55 @@ class AioHttpTransport:
         # An entry count, not proof of headers sent or peer receipt.
         check_current_effect(getattr(self, "_effect_guard", None))
         diagnostic("network_attempt")
-        async with session.request(
-            method,
-            url,
-            data=body,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=float(timeout_seconds)),
-            allow_redirects=False,
-            proxy=self._proxy_url,
-            ssl=True,
-        ) as response:
-            diagnostic("http_response", http_status=response.status)
-            content_encoding = response.headers.get("Content-Encoding", "")
-            # Redirect entities are never interpreted by SourceHttpService.
-            # Keep their bounded wire bytes opaque so an encoded intermediate
-            # entity cannot prevent the service from validating its next hop.
-            # Final response bodies still require identity encoding.
-            if response.status not in {
-                301,
-                302,
-                303,
-                307,
-                308,
-            } and content_encoding.strip().lower() not in {"", "identity"}:
-                raise SourceHttpError("invalid_response") from None
-            if (
-                response.content_length is not None
-                and response.content_length > maximum
-            ):
-                raise SourceHttpError("response_too_large") from None
-            body_buffer = bytearray()
-            async for chunk in response.content.iter_chunked(_CHUNK_SIZE):
-                body_buffer.extend(chunk)
-                if len(body_buffer) > maximum:
+        with (
+            measure_stage("http"),
+            measure_stage("oauth_http" if oauth else "http", declaration=source_id),
+        ):
+            async with session.request(
+                method,
+                url,
+                data=body,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=float(timeout_seconds)),
+                allow_redirects=False,
+                proxy=self._proxy_url,
+                ssl=True,
+            ) as response:
+                diagnostic("http_response", http_status=response.status)
+                content_encoding = response.headers.get("Content-Encoding", "")
+                # Redirect entities are never interpreted by SourceHttpService.
+                # Keep their bounded wire bytes opaque so an encoded intermediate
+                # entity cannot prevent the service from validating its next hop.
+                # Final response bodies still require identity encoding.
+                if response.status not in {
+                    301,
+                    302,
+                    303,
+                    307,
+                    308,
+                } and content_encoding.strip().lower() not in {"", "identity"}:
+                    raise SourceHttpError("invalid_response") from None
+                if (
+                    response.content_length is not None
+                    and response.content_length > maximum
+                ):
                     raise SourceHttpError("response_too_large") from None
+                body_buffer = bytearray()
+                async for chunk in response.content.iter_chunked(_CHUNK_SIZE):
+                    body_buffer.extend(chunk)
+                    if len(body_buffer) > maximum:
+                        raise SourceHttpError("response_too_large") from None
 
-            response_headers = {
-                str(key): str(value)
-                for key, value in response.headers.items()
-                if not any(marker in key.lower() for marker in _RESPONSE_SECRET_MARKERS)
-            }
-            return validate_contract(
-                HttpResponse(response.status, response_headers, bytes(body_buffer))
-            )
+                response_headers = {
+                    str(key): str(value)
+                    for key, value in response.headers.items()
+                    if not any(
+                        marker in key.lower() for marker in _RESPONSE_SECRET_MARKERS
+                    )
+                }
+                return validate_contract(
+                    HttpResponse(response.status, response_headers, bytes(body_buffer))
+                )
 
     async def close(self) -> None:
         """Close the owned session once; safe to call during repeated shutdown."""

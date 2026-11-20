@@ -139,9 +139,19 @@ OPTIONAL = {
 }
 HISTORY = obj({**{key: integer() for key in COUNTS}, **OPTIONAL}, OPTIONAL)
 REQUEST_OPS = "UniversalisWorlds UniversalisDataCenters OtherBusinessRead FF14WorldRegions FF14WorldServers FF14PublicCharacter FF14PublicCharacterZone FF14OutputMetadataShape FF14CharacterMetadata FF14OutputMetadata FF14CatalogCharacter".split()
+HISTORY_TIMING_FIELDS = "slice_reads slice_hits slice_invalid slice_decode_us compact_read_mask compact_hit_mask legacy_read_mask legacy_hit_mask refresh_wait_ms planned eligible cache_hit attempted not_queried read_ms ranking_fetch_ms duty_order_ms fetch_ms write_ms total_ms".split()
 REQUEST = obj(
     {
         "kind": text(values=["module_source_http_fetch"]),
+        "stage_ms": obj({stage: integer() for stage in STAGE_MESSAGES}, STAGE_MESSAGES),
+        "cumulative_http_ms": integer(),
+        "diagnostic_ms": integer(),
+        "evidence_flush_us": integer(),
+        "evidence_events": integer(0, 64),
+        "history": obj(
+            {key: integer() for key in HISTORY_TIMING_FIELDS}, HISTORY_TIMING_FIELDS
+        ),
+        "outcome": text(values=["success", "partial_success", "error", "unknown"]),
         "operations": array(
             obj(
                 {
@@ -159,7 +169,8 @@ REQUEST = obj(
         "underlying_http_cache": text(values=["unknown"]),
         "host_oauth": text(values=["unobserved"]),
         "network_attempts": text(values=["unknown"]),
-    }
+    },
+    ("evidence_flush_us", "evidence_events", "history"),
 )
 
 

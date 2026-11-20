@@ -340,6 +340,45 @@ class _CacheAccessCoordinator:
         result = await self._await_boundary(
             "cache_read", lambda: self.__repository.get(request)
         )
+        return self._checked_lookup(request, result)
+
+    async def lookup_many(self, queries):
+        await self._admit()
+
+        def check_queries():
+            if type(queries) is not tuple or not 1 <= len(queries) <= 12:
+                raise ValueError("invalid cache batch size")
+            for query in queries:
+                if type(query) is not CacheQuery:
+                    raise TypeError("cache query must be canonical")
+                validate_contract(query)
+                _bounded_key(query.key)
+                if query.visibility is not queries[0].visibility:
+                    raise ValueError("cache batch must use one visibility")
+
+        parameters(check_queries)
+        keys = tuple(q.key for q in queries)
+        visibility = queries[0].visibility or self._default_visibility()
+        scope = await self._scope(visibility)
+        requests = tuple(CacheAccessRequest(key, visibility, scope) for key in keys)
+        get_many = getattr(self.__repository, "get_many", None)
+        if not callable(get_many):
+            return tuple([await self.lookup(request) for request in requests])
+        results = await self._await_boundary("cache_read", lambda: get_many(requests))
+        deadline = self.__invocation.deadline
+        if deadline is not None and deadline <= self.__clock():
+            raise CacheAccessError(
+                "invocation deadline has expired", code="invocation_expired"
+            )
+        if type(results) is not tuple or len(results) != len(requests):
+            raise ValueError("cache repository returned an invalid batch")
+        return tuple(
+            self._checked_lookup(request, result)
+            for request, result in zip(requests, results, strict=True)
+        )
+
+    @staticmethod
+    def _checked_lookup(request, result):
         if type(result) is not CacheLookup:
             raise ValueError("cache repository returned an invalid lookup")
         validate_contract(result)
@@ -500,6 +539,12 @@ class CacheAccessService(CacheAccess):
         return await self.__coordinator.lookup(private_request)
 
     @public_boundary()
+    async def lookup_many(
+        self, requests: tuple[CacheQuery, ...]
+    ) -> tuple[CacheLookup, ...]:
+        return await self.__coordinator.lookup_many(requests)
+
+    @public_boundary()
     async def put(
         self,
         key: str,
@@ -597,6 +642,25 @@ class ModuleCacheRepository:
 
     async def get(self, request, **kwargs):
         result = await self._repository.get(self._request(request), **kwargs)
+        return self._logical_lookup(request, result)
+
+    async def get_many(self, requests):
+        physical = tuple(self._request(request) for request in requests)
+        get_many = getattr(self._repository, "get_many", None)
+        if callable(get_many):
+            results = await get_many(physical)
+        else:
+            results = tuple(
+                [await self._repository.get(request) for request in physical]
+            )
+        if type(results) is not tuple or len(results) != len(requests):
+            raise ValueError("cache repository returned an invalid batch")
+        return tuple(
+            self._logical_lookup(request, result)
+            for request, result in zip(requests, results, strict=True)
+        )
+
+    def _logical_lookup(self, request, result):
         if type(result) is not CacheLookup:
             raise ValueError("cache repository returned an invalid lookup")
         validate_contract(result)

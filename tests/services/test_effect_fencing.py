@@ -216,7 +216,15 @@ class EffectFencingTests(unittest.IsolatedAsyncioTestCase):
         transport = Transport()
         with invocation_guard(self.core):
             task = asyncio.create_task(
-                transport._send("GET", URL("https://example.test/"), None, {}, 1, 1024)
+                transport._send(
+                    "GET",
+                    URL("https://example.test/"),
+                    None,
+                    {},
+                    1,
+                    1024,
+                    source_id="public",
+                )
             )
         await entered.wait()
         self.core.close()

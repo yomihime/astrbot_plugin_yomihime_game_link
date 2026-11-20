@@ -6,11 +6,14 @@ import asyncio
 import json
 import math
 import re
+from collections import deque
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 from decimal import Decimal
 from html.parser import HTMLParser
-from time import monotonic, time
+from time import monotonic, perf_counter_ns, time
 from urllib.parse import quote
+from weakref import WeakValueDictionary
 
 from ....yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
 from ....yomihime_game_link_sdk.display import (
@@ -58,8 +61,11 @@ from .fflogs_catalog import (
     FFLOGS_CN_SOURCE,
     FFLOGS_GLOBAL_SOURCE,
     GRAPHQL_PATH,
+    MAX_SERVER_PAGES,
     FFLogsCatalog,
     FFLogsGraphQLError,
+    FFLogsResponseTooLarge,
+    match_servers,
     normalized_encounter_name,
     parse_graphql_envelope,
     resolve_output_metadata,
@@ -91,7 +97,9 @@ MAX_HTML_TAGS = 20_000
 METADATA_DEADLINE_SECONDS = 5
 METADATA_CACHE_SECONDS = 900
 METADATA_FAILURE_CACHE_SECONDS = 60
-CATALOG_BATCH_SIZE = 12
+CATALOG_BATCH_SIZE = 24
+SMALL_CATALOG_BATCH_SIZE = 12
+HISTORY_CACHE_READERS = 3
 MAX_CHARACTER_ROWS = 40
 CATALOG_DIAGNOSTIC_BYTES = 16_384
 _NUMBER = re.compile(r"(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?\Z", re.ASCII)
@@ -144,6 +152,9 @@ class FFLogsCharacterLookup:
         self._lifecycle = object()
         self._metadata_cache: dict[str, tuple[float, OutputMetadata | None, str]] = {}
         self._ranking_contract_cache = {}
+        self._server_cache = {}
+        # Only active callers retain locks. No invocation port or task is shared.
+        self._refresh_locks = WeakValueDictionary()
         from .duty_order import DutyOrderCatalog
 
         self._duty_order = DutyOrderCatalog()
@@ -154,9 +165,59 @@ class FFLogsCharacterLookup:
     def close(self) -> None:
         self._lifecycle = object()
         self._metadata_cache.clear()
+        self._server_cache.clear()
+        self._refresh_locks.clear()
         self._ranking_contract_cache.clear()
         self._duty_order.close()
         self._chat_pending.close()
+
+    @asynccontextmanager
+    async def _refresh(self, key, deadline):
+        """Wait within the caller's own budget; never borrow another caller's ports."""
+        lock = self._refresh_locks.setdefault(key, asyncio.Lock())
+        try:
+            async with asyncio.timeout(max(0, deadline - monotonic())):
+                await lock.acquire()
+        except TimeoutError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            lock.release()
+
+    async def _resolve_server(
+        self, scope, realm, source_id, label, page_budget, lifecycle, metrics
+    ):
+        def active():
+            if self._lifecycle is not lifecycle:
+                raise ServiceUnavailable()
+
+        catalog = FFLogsCatalog(scope.http, source_id, check_active=active)
+        if scope.check_source is None:
+            # A fetch-only source cannot independently revalidate a cached read.
+            return await catalog.resolve_server(realm, label, page_budget=page_budget)
+        key = (source_id, realm, page_budget)
+        async with self._refresh_locks.setdefault(key, asyncio.Lock()):
+            active()
+            cached = self._server_cache.get(key)
+            hit = cached is not None and cached[0] > monotonic()
+            if metrics is not None:
+                for op in ("FF14WorldRegions", "FF14WorldServers"):
+                    metrics.cache(op, hit)
+            if hit:
+                await scope.check_source(source_id)
+                active()
+                directory = cached[1]
+            else:
+                directory = await catalog.load_servers(realm, page_budget=page_budget)
+                active()
+                if directory.complete:
+                    self._server_cache[key] = (
+                        monotonic() + METADATA_CACHE_SECONDS,
+                        directory,
+                    )
+            return match_servers(directory, label)
 
     async def _character_metadata(
         self,
@@ -225,7 +286,17 @@ class FFLogsCharacterLookup:
         except SourceHttpError as exc:
             if exc.code == "cancelled":
                 raise
-            state = "unavailable_source"
+            state = (
+                "unavailable_permission"
+                if exc.code
+                in {
+                    "request_rejected",
+                    "credentials_unavailable",
+                    "source_not_declared",
+                }
+                or exc.status_code in {401, 403}
+                else "unavailable_source"
+            )
             if failures is not None:
                 failures.source_error(exc)
         except FFLogsGraphQLError:
@@ -257,7 +328,12 @@ class FFLogsCharacterLookup:
             if metadata is not None
             else METADATA_FAILURE_CACHE_SECONDS
         )
-        self._metadata_cache[source_id] = (monotonic() + ttl, metadata, state)
+        if state not in {
+            "unavailable_permission",
+            "unavailable_service",
+            "unavailable_timeout",
+        }:
+            self._metadata_cache[source_id] = (monotonic() + ttl, metadata, state)
         if evidence is not None:
             evidence.observe("FF14MetadataState", {"state": state}, status=None)
         return metadata
@@ -278,21 +354,84 @@ class FFLogsCharacterLookup:
         budget=None,
         failures=None,
     ):
+        from .fflogs_history_cache import history_identity
+
+        started = monotonic()
+        stop_at = deadline if deadline is not None else started + 30
+        identity = history_identity(
+            source_id, character, identity_variables, metadata, cache_owner
+        )
+        targets = _catalog_query_targets(
+            select_character_zones(metadata, character.zone_id)
+        )
+        has_cache = getattr(scope, "cache", None) is not None
+        lock = (
+            # Default zones can select overlapping slices of the same catalog.
+            self._refresh(("history", identity, character.metric), stop_at)
+            if has_cache
+            else nullcontext(True)
+        )
+        wait_started = monotonic()
+        async with lock as acquired:
+            if metrics is not None:
+                metrics.history_timing = {
+                    "refresh_wait_ms": max(0, int((monotonic() - wait_started) * 1000))
+                    if has_cache
+                    else 0
+                }
+            if self._lifecycle is not lifecycle:
+                raise ServiceUnavailable()
+            if not acquired:
+                # The caller's history budget expired in the queue. No storage
+                # or upstream work may start without this caller owning the lock.
+                return _assemble_catalog_rankings(character, metadata, targets, {})
+            return await self._ranking_plan(
+                scope,
+                source_id,
+                character,
+                metadata,
+                identity_variables,
+                lifecycle,
+                evidence,
+                stop_at,
+                targets,
+                identity,
+                started,
+                metrics,
+                budget,
+                failures,
+            )
+
+    async def _ranking_plan(
+        self,
+        scope,
+        source_id,
+        character,
+        metadata,
+        identity_variables,
+        lifecycle,
+        evidence,
+        stop_at,
+        targets,
+        identity,
+        started,
+        metrics,
+        budget,
+        failures,
+    ):
         from .fflogs_history_cache import (
             HISTORY_CACHE_TTL,
             cache_pack_key,
             cache_packs,
-            history_identity,
+            complete_pack_key,
+            complete_packs,
+            complete_payload,
             pack_payload,
+            restore_complete_pack,
             restore_pack,
             snapshot_payload,
         )
 
-        started = monotonic()
-        stop_at = deadline if deadline is not None else started + 30
-        targets = _catalog_query_targets(
-            select_character_zones(metadata, character.zone_id)
-        )
         all_ordered = _bounded_catalog_targets(targets)
         keys = tuple(
             dict.fromkeys(
@@ -304,11 +443,14 @@ class FFLogsCharacterLookup:
             for target in targets
             if target[3] is not None
         }
-        identity = history_identity(
-            source_id, character, identity_variables, metadata, cache_owner
-        )
         cache = getattr(scope, "cache", None)
-        packs = cache_packs(metadata, tuple(key for key in keys if key in eligible))
+        requested = tuple(key for key in keys if key in eligible)
+        packs = cache_packs(metadata, requested)
+        # Twelve legacy packs fit the measured cold-read window on the Host.
+        # Keep smaller catalogs on the existing format without an extra lookup.
+        compact = complete_packs(metadata, requested) if len(packs) > 12 else ()
+        if len(compact) >= len(packs):
+            compact = ()
         cached, dates, loaded = {}, {}, {}
         fresh, acquired, attempted = {}, {}, set()
         summary = {
@@ -318,101 +460,258 @@ class FFLogsCharacterLookup:
             **(budget or {}),
         }
 
+        if metrics is not None:
+            summary.update(metrics.history_timing)
+            metrics.history_timing = summary
+
         def active():
             if self._lifecycle is not lifecycle:
                 raise ServiceUnavailable()
 
         # Cache recovery and authority remain owned by Core.
-        duty_order = None
-        if any(target[2] == "ultimate" for target in targets):
-            duty_order = await self._duty_order.load(
-                scope.http,
-                deadline=stop_at,
-                evidence=evidence,
-                names=tuple(
-                    {
-                        ultimate_group_key(
-                            zone.name, encounter.name
-                        ): ultimate_group_name(zone.name, encounter.name)
-                        for zone, _, category, _ in targets
-                        if category == "ultimate"
-                        for encounter in zone.encounters
-                    }.values()
-                ),
-            )
-            active()
+        async def order():
+            if not any(target[2] == "ultimate" for target in targets):
+                return None
+            async with self._refresh(("duty_order",), stop_at) as acquired:
+                active()
+                if not acquired:
+                    return None
+                return await self._duty_order.load(
+                    scope.http,
+                    check_source=getattr(scope, "check_source", None),
+                    deadline=stop_at,
+                    evidence=evidence,
+                    names=tuple(
+                        {
+                            ultimate_group_key(
+                                zone.name, encounter.name
+                            ): ultimate_group_name(zone.name, encounter.name)
+                            for zone, _, category, _ in targets
+                            if category == "ultimate"
+                            for encounter in zone.encounters
+                        }.values()
+                    ),
+                )
 
         available = max(0, stop_at - monotonic())
         write_reserve = min(2, available * 0.1) if cache is not None else 0
         fetch_stop = stop_at - write_reserve
         read_stop = min(fetch_stop, monotonic() + min(2, available * 0.1))
         read_started = monotonic()
-        if cache is not None:
-            for index, group in enumerate(packs):
+        savage_keys = {
+            _target_key(target, character.metric)
+            for target in targets
+            if target[2] == "savage"
+        }
+
+        compact_read = set()
+
+        def validate_selections(selections):
+            for key, selection in selections.items():
+                if (
+                    not _selection_scope_matches(selection, key)
+                    or not _selection_membership_matches(metadata, key[0], selection)
+                    or len({row.encounter_id for row in selection.rows})
+                    != len(selection.rows)
+                    or (key in savage_keys and selection.size != 8)
+                ):
+                    raise FFLogsPayloadError("history pack selection")
+
+        summary.update(
+            slice_reads=0,
+            slice_hits=0,
+            slice_invalid=0,
+            slice_decode_us=0,
+            compact_hit_mask=0,
+            compact_read_mask=0,
+            legacy_hit_mask=0,
+            legacy_read_mask=0,
+        )
+
+        def restore_lookup(index, group, compact_format, cache_key, lookup):
+            summary["slice_reads"] += 1
+            prefix = "compact" if compact_format else "legacy"
+            if index < 30:
+                summary[f"{prefix}_read_mask"] |= 1 << index
+            snapshots, selections, times = {}, {}, {}
+            hit = (
+                lookup.status is CacheLookupStatus.HIT
+                and lookup.entry.expires_at.timestamp() > time()
+            )
+            if hit:
+                if compact_format:
+                    selections, times = restore_complete_pack(
+                        lookup.entry.payload, cache_key, group
+                    )
+                else:
+                    snapshots, selections, times = restore_pack(
+                        lookup.entry.payload, identity, group
+                    )
+                validate_selections(selections)
+                summary["slice_hits"] += 1
+            if compact_format:
+                compact_read.add(group)
+            else:
+                loaded[index] = snapshots
+            for key, selection in selections.items():
+                if key not in dates or times[key] > dates[key]:
+                    cached[key], dates[key] = selection, times[key]
+            if selections and index < 30:
+                summary[f"{prefix}_hit_mask"] |= 1 << index
+            return hit
+
+        def accept(index, group, compact_format, cache_key, lookup):
+            decode_started = perf_counter_ns()
+            try:
+                return restore_lookup(index, group, compact_format, cache_key, lookup)
+            except (PermissionError, ServiceUnavailable, OperationTimeout):
+                raise
+            except Exception:
+                summary["slice_invalid"] += 1
+                return False
+            finally:
+                summary["slice_decode_us"] += (
+                    perf_counter_ns() - decode_started
+                ) // 1000
+
+        async def read_packs(pending_reads, compact_format):
+            restored = False
+            for index, group in pending_reads:
                 active()
                 if monotonic() >= read_stop:
                     break
+                cache_key = (complete_pack_key if compact_format else cache_pack_key)(
+                    identity, group
+                )
                 try:
                     async with asyncio.timeout(max(0, read_stop - monotonic())):
-                        lookup = await cache.lookup(
-                            CacheQuery(cache_pack_key(identity, group))
-                        )
-                    snapshots, selections, times = {}, {}, {}
-                    if (
-                        lookup.status is CacheLookupStatus.HIT
-                        and lookup.entry.expires_at.timestamp() > time()
-                    ):
-                        snapshots, selections, times = restore_pack(
-                            lookup.entry.payload, identity, group
-                        )
-                        for key, selection in selections.items():
-                            if (
-                                not _selection_scope_matches(selection, key)
-                                or not _selection_membership_matches(
-                                    metadata, key[0], selection
-                                )
-                                or len({row.encounter_id for row in selection.rows})
-                                != len(selection.rows)
-                                or any(
-                                    target[2] == "savage" and selection.size != 8
-                                    for target in targets
-                                    if _target_key(target, character.metric) == key
-                                )
-                            ):
-                                raise FFLogsPayloadError("history pack selection")
-                    loaded[index] = snapshots
-                    cached.update(selections)
-                    dates.update(times)
+                        lookup = await cache.lookup(CacheQuery(cache_key))
+                    active()
+                    if lookup.status is CacheLookupStatus.REJECTED:
+                        raise AccessDenied()
+                    if monotonic() >= read_stop:
+                        break
+                    restored |= accept(index, group, compact_format, cache_key, lookup)
                 except CacheUnavailable:
-                    loaded[index] = {}
+                    continue
                 except (PermissionError, ServiceUnavailable, OperationTimeout):
                     raise
                 except TimeoutError:
                     break
                 except Exception:
-                    # Corrupt/oversize codecs and ordinary storage failures are misses.
-                    loaded[index] = {}
+                    # Fetch fresh rows, but do not overwrite unverified siblings.
+                    continue
                 active()
+            return restored
+
+        lookup_many = getattr(cache, "lookup_many", None)
+
+        async def read_groups(groups, compact_format):
+            if callable(lookup_many):
+                key_for = complete_pack_key if compact_format else cache_pack_key
+                for offset in range(0, len(groups), 12):
+                    chunk = groups[offset : offset + 12]
+                    active()
+                    if monotonic() >= read_stop:
+                        break
+                    queries = tuple(
+                        CacheQuery(key_for(identity, group)) for _, group in chunk
+                    )
+                    try:
+                        async with asyncio.timeout(max(0, read_stop - monotonic())):
+                            results = await lookup_many(queries)
+                    except CacheUnavailable:
+                        # Isolate an unreadable physical row while the budget allows.
+                        await read_packs(iter(chunk), compact_format)
+                        continue
+                    except (PermissionError, ServiceUnavailable, OperationTimeout):
+                        raise
+                    except TimeoutError:
+                        break
+                    active()
+                    if any(row.status is CacheLookupStatus.REJECTED for row in results):
+                        raise AccessDenied()
+                    for (index, group), query, lookup in zip(
+                        chunk, queries, results, strict=True
+                    ):
+                        if monotonic() >= read_stop:
+                            break
+                        accept(index, group, compact_format, query.key, lookup)
+                return
+            pending_reads = iter(groups)
+            readers = [
+                asyncio.create_task(read_packs(pending_reads, compact_format))
+                for _ in range(min(HISTORY_CACHE_READERS, len(groups)))
+            ]
+            try:
+                await asyncio.gather(*readers)
+            finally:
+                for reader in readers:
+                    if not reader.done():
+                        reader.cancel()
+                await asyncio.gather(*readers, return_exceptions=True)
+
+        compact_hit = False
+        compact_covered = set()
+        if cache is not None:
+            if compact and callable(lookup_many):
+                await read_groups(tuple(enumerate(compact)), True)
+                compact_covered.update(cached)
+            elif compact:
+                # The first slice is published last. One miss reaches legacy packs.
+                compact_hit = await read_packs(iter(((0, compact[0]),)), True)
+                if compact_hit:
+                    await read_groups(tuple(enumerate(compact[1:], 1)), True)
+                    compact_covered.update(cached)
+            legacy = tuple(
+                (i, group)
+                for i, group in enumerate(packs)
+                if any(key not in cached for key in group)
+            )
+            await read_groups(legacy, False)
         summary["read_ms"] = max(0, int((monotonic() - read_started) * 1000))
         pairs = tuple(key for key in keys if key in eligible and key not in cached)
         fetch_started = monotonic()
-        await self._fetch_catalog_rankings(
-            scope,
-            source_id,
-            character,
-            metadata,
-            identity_variables,
-            lifecycle,
-            evidence,
-            deadline=fetch_stop,
-            targets=targets,
-            pairs=pairs,
-            outcomes=fresh,
-            fetched=acquired,
-            on_attempt=attempted.update,
-            summary=summary,
-            failures=failures,
-        )
+
+        async def timed(key, operation):
+            started = monotonic()
+            try:
+                return await operation()
+            finally:
+                summary[key] = max(0, int((monotonic() - started) * 1000))
+
+        def history():
+            return self._fetch_catalog_rankings(
+                scope,
+                source_id,
+                character,
+                metadata,
+                identity_variables,
+                lifecycle,
+                evidence,
+                deadline=fetch_stop,
+                targets=targets,
+                pairs=pairs,
+                outcomes=fresh,
+                fetched=acquired,
+                on_attempt=attempted.update,
+                summary=summary,
+                failures=failures,
+            )
+
+        # Menu sorting and FFLogs history use separate sources and no shared inputs
+        # beyond the verified catalog. Join both before assembling or saving rows.
+        tasks = [
+            asyncio.create_task(timed("duty_order_ms", order)),
+            asyncio.create_task(timed("ranking_fetch_ms", history)),
+        ]
+        try:
+            duty_order, _ = await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         summary["fetch_ms"] = max(0, int((monotonic() - fetch_started) * 1000))
         active()
         if any(value == "hidden" for value in fresh.values()):
@@ -423,14 +722,84 @@ class FFLogsCharacterLookup:
         outcomes = {**cached, **fresh}
         used_dates = {**dates, **acquired}
         unsaved = set()
+        write_started = monotonic()
+        saved = set()
+        verified = {**cached, **good}
+        updates_needed = verified.keys() - compact_covered
+        if cache is not None and compact and updates_needed:
+            expires_at = max(used_dates.values()) + HISTORY_CACHE_TTL
+            written = set()
+            for group in (*compact[1:], compact[0]):
+                anchor = group == compact[0]
+                if updates_needed.isdisjoint(group) and not (anchor and written):
+                    continue
+                active()
+                if monotonic() >= stop_at:
+                    break
+                try:
+                    cache_key = complete_pack_key(identity, group)
+                    members = {key: verified[key] for key in group if key in verified}
+                    times = {key: used_dates[key] for key in members}
+                    if len(members) < len(group) and group not in compact_read:
+                        # An incomplete replacement may have live siblings. Read
+                        # them through this invocation's bound port before writing.
+                        try:
+                            async with asyncio.timeout(max(0, stop_at - monotonic())):
+                                existing = await cache.lookup(CacheQuery(cache_key))
+                            active()
+                            if existing.status is CacheLookupStatus.REJECTED:
+                                raise AccessDenied()
+                            if (
+                                existing.status is CacheLookupStatus.HIT
+                                and existing.entry.expires_at.timestamp() > time()
+                            ):
+                                previous, previous_dates = restore_complete_pack(
+                                    existing.entry.payload, cache_key, group
+                                )
+                                validate_selections(previous)
+                                for key, selection in previous.items():
+                                    if (
+                                        key not in times
+                                        or previous_dates[key] > times[key]
+                                    ):
+                                        members[key], times[key] = (
+                                            selection,
+                                            previous_dates[key],
+                                        )
+                        except (FFLogsPayloadError, CacheUnavailable):
+                            if anchor:
+                                break
+                            continue
+                    payload = complete_payload(cache_key, group, members, times)
+                    # The container lives until its newest member expires.
+                    # Restore independently checks every original acquisition time.
+                    if times:
+                        expires_at = max(
+                            expires_at, max(times.values()) + HISTORY_CACHE_TTL
+                        )
+                    ttl = expires_at - time()
+                    if ttl <= 0:
+                        break
+                    async with asyncio.timeout(max(0, stop_at - monotonic())):
+                        await cache.put(cache_key, payload, ttl_seconds=ttl)
+                    written.update(members.keys() & verified.keys())
+                except CacheUnavailable:
+                    break
+                except (PermissionError, ServiceUnavailable, OperationTimeout):
+                    raise
+                except Exception:
+                    break
+            else:
+                saved.update(written)
+            active()
         prepared = {}
         for key, selection in good.items():
+            if key in saved:
+                continue
             try:
                 prepared[key] = snapshot_payload(selection, fetched_at=acquired[key])
             except (FFLogsPayloadError, ValueError, TypeError):
                 unsaved.add(key)
-        write_started = monotonic()
-        saved = set()
         for index, group in enumerate(packs):
             updates = {key: prepared[key] for key in group if key in prepared}
             if not updates:
@@ -664,8 +1033,13 @@ class FFLogsCharacterLookup:
                     failures.source_error(error, started=started)
                 if error.status_code in (401, 403):
                     raise PermissionError() from None
-                if error.status_code == 429:
+                if error.code == "rate_limited" or error.status_code == 429:
                     limited = True
+                elif len(keys) > SMALL_CATALOG_BATCH_SIZE and (
+                    error.code in {"request_too_large", "response_too_large"}
+                    or error.status_code == 413
+                ):
+                    return None
                 return {key: "request_failed" for key in keys}
             except (FFLogsGraphQLError, FFLogsPayloadError) as error:
                 if failures is not None:
@@ -676,6 +1050,11 @@ class FFLogsCharacterLookup:
                         status=status,
                         started=started,
                     )
+                if (
+                    isinstance(error, FFLogsResponseTooLarge)
+                    and len(keys) > SMALL_CATALOG_BATCH_SIZE
+                ):
+                    return None
                 return {key: "request_failed" for key in keys}
             except OperationTimeout:
                 raise
@@ -734,17 +1113,22 @@ class FFLogsCharacterLookup:
                     result[key] = "invalid"
             return result
 
-        pending = iter(
+        pending = deque(
             pairs[i : i + CATALOG_BATCH_SIZE]
             for i in range(0, len(pairs), CATALOG_BATCH_SIZE)
         )
         active_count = 0
+        small_batches = False
 
         async def worker():
-            nonlocal hidden, active_count
-            for batch_keys in pending:
+            nonlocal hidden, active_count, small_batches
+            while pending:
                 if hidden or limited or monotonic() >= stop_at:
                     return
+                batch_keys = pending.popleft()
+                if small_batches and len(batch_keys) > SMALL_CATALOG_BATCH_SIZE:
+                    pending.appendleft(batch_keys[SMALL_CATALOG_BATCH_SIZE:])
+                    batch_keys = batch_keys[:SMALL_CATALOG_BATCH_SIZE]
                 active_count += 1
                 if summary is not None:
                     summary["batches_attempted"] = (
@@ -755,6 +1139,13 @@ class FFLogsCharacterLookup:
                     )
                 try:
                     outcome = await batch(batch_keys)
+                    if outcome is None:
+                        # The transport or decoder rejected this batch's size.
+                        # Keep its actual failure if the deadline or quota stops the retry.
+                        outcomes.update(dict.fromkeys(batch_keys, "request_failed"))
+                        small_batches = True
+                        pending.appendleft(batch_keys)
+                        continue
                     outcomes.update(outcome)
                     hidden = hidden or any(
                         value == "hidden" for value in outcome.values()
@@ -800,7 +1191,12 @@ class FFLogsCharacterLookup:
             return await invoke_character_tool(self, context, parameters, failures)
         from .fflogs_evidence import RequestMetrics
 
-        metrics = RequestMetrics() if explicit_command else None
+        metrics = (
+            RequestMetrics()
+            if explicit_command
+            or getattr(context, "origin", None) is InvocationOrigin.WEB_PUBLIC
+            else None
+        )
         observation = None
         if (
             context is not None
@@ -810,7 +1206,6 @@ class FFLogsCharacterLookup:
         ):
             from .fflogs_scope_contract import InvocationObservation
 
-            metrics = RequestMetrics()
             observation = InvocationObservation(parameters, metrics)
         started = monotonic()
         stop_at = getattr(context, "deadline", None)
@@ -850,10 +1245,11 @@ class FFLogsCharacterLookup:
             if observation is not None:
                 observation.reject("deadline")
                 result = observation.attach(result)
-        if metrics is not None:
-            metrics.finish()
-            if metrics.evidence is not None:
-                await metrics.evidence.flush()
+        if metrics is not None and metrics.evidence is not None:
+            failures.end_stage()
+            await metrics.flush_result(
+                outcome=result.status.value, stages=failures.stage_ms
+            )
         return result
 
     async def _execute(
@@ -895,6 +1291,7 @@ class FFLogsCharacterLookup:
 
         if scope is None:
             scope = await self._services.scopes.bind(context)
+        check_source = getattr(scope.http, "budget", None)
         observed_http = scope.http
         if failures is not None:
             if failures.port is None:
@@ -907,6 +1304,7 @@ class FFLogsCharacterLookup:
             http=observation.wrap(observed_http)
             if observation is not None
             else observed_http,
+            check_source=check_source,
             cache=getattr(scope, "cache", None),
             records=getattr(scope, "records", None),
         )
@@ -962,7 +1360,9 @@ class FFLogsCharacterLookup:
             else None
         )
         if metrics is not None:
-            metrics.evidence = evidence
+            metrics.evidence = evidence or Evidence(source_id, metrics.diagnostics)
+        if failures is not None:
+            failures.begin(source_id, "authentication")
         credential_state = await _credential_state(self._services, realm)
 
         def stage_error(code, default):
@@ -1048,15 +1448,14 @@ class FFLogsCharacterLookup:
                     failures.begin(source_id, "server_directory")
                 if observation is not None:
                     observation.stage = "server-directory"
-                catalog = FFLogsCatalog(scope.http, source_id)
-                resolution = await catalog.resolve_server(
+                resolution = await self._resolve_server(
+                    scope,
                     realm,
+                    source_id,
                     server_label,
-                    **(
-                        {"page_budget": 4}
-                        if capture_evidence or advanced_filters
-                        else {}
-                    ),
+                    4 if capture_evidence or advanced_filters else MAX_SERVER_PAGES,
+                    lifecycle,
+                    metrics,
                 )
             else:
                 from types import SimpleNamespace
@@ -1346,15 +1745,34 @@ class FFLogsCharacterLookup:
             try:
                 if failures is not None:
                     failures.begin(source_id, "ranking_metadata")
-                metadata = await self._character_metadata(
-                    scope,
-                    source_id,
-                    lifecycle,
-                    evidence,
-                    deadline=deadline,
-                    metrics=metrics,
-                    failures=failures,
+                metadata_stop = min(
+                    deadline if deadline is not None else float("inf"),
+                    monotonic() + METADATA_DEADLINE_SECONDS,
                 )
+                async with self._refresh(
+                    ("metadata", source_id), metadata_stop
+                ) as acquired:
+                    if self._lifecycle is not lifecycle:
+                        raise ServiceUnavailable()
+                    if acquired:
+                        if (
+                            check_source is not None
+                            and source_id in self._metadata_cache
+                        ):
+                            await check_source(source_id)
+                            if self._lifecycle is not lifecycle:
+                                raise ServiceUnavailable()
+                        metadata = await self._character_metadata(
+                            scope,
+                            source_id,
+                            lifecycle,
+                            evidence,
+                            deadline=metadata_stop,
+                            metrics=metrics,
+                            failures=failures,
+                        )
+                    elif failures is not None:
+                        failures.source_error(TimeoutError())
                 if metadata is not None and metadata.character_catalog_verified:
                     if failures is not None:
                         failures.begin(source_id, "ranking_history")
@@ -1380,6 +1798,8 @@ class FFLogsCharacterLookup:
                 return stage_error(
                     ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。"
                 )
+        if failures is not None:
+            failures.end_stage()
         if observation is not None:
             observation.stage = "result"
         result = _character_result(

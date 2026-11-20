@@ -58,11 +58,13 @@ class FFLogsToolHostTests(unittest.IsolatedAsyncioTestCase):
     call = tools_fixture.LLMToolTests.call
 
     async def start_logs(self, *, configured=True, count=1):
-        environment = patch.dict(
-            os.environ, {"YGL_SECRET_KEY": base64.b64encode(bytes(range(32))).decode()}
-        )
-        environment.start()
-        self.addCleanup(environment.stop)
+        name = "YGL_SECRET_KEY"
+        previous = os.environ.get(name)
+        if previous is None:
+            self.addCleanup(os.environ.pop, name, None)
+        else:
+            self.addCleanup(os.environ.__setitem__, name, previous)
+        os.environ[name] = base64.b64encode(bytes(range(32))).decode()
         # Borrow the unchanged publisher fixture with a credential-capable
         # transport constructor. SourceHttp captures the same channel at init;
         # adding one afterward would not establish that proof.
@@ -286,6 +288,16 @@ class FFLogsToolHostTests(unittest.IsolatedAsyncioTestCase):
         event = runtime_fixture._Event(context=self.context)
         event.message = '/ygl ff14 logs Cerberus "Synthetic Hero"'
         self.assertIsNone(await self.runtime.handle_event(event))
+        trace = self.runtime.core_runtime.sync_diagnostics.snapshot()["attempts"][-1]
+        self.assertEqual(trace["origin"], "command")
+        for stage in (
+            "render",
+            "host_send",
+            "bitmap_render",
+            "host_event_send",
+            "diagnostic_emit.FF14RequestSummary",
+        ):
+            self.assertEqual(trace["stage_timings"][stage]["count"], 1)
         reply = self.context.calls[-1][1].chain[0].text
         self.assertIn("Synthetic Hero", reply)
         self.assertIn("FFLogs", reply)

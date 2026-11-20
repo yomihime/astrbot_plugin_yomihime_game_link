@@ -201,14 +201,17 @@ class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(matching_trace["capability_status"], "error")
             debug = [call.args[0] for call in logger.debug.call_args_list]
-            self.assertEqual(len(debug), 1)
-            self.assertTrue(debug[0].startswith("GAME_LINK_TRACE "))
-            self.assertNotIn("PrivateRoleFixture", debug[0])
-            self.assertNotIn(fixture.SENTINEL, debug[0])
-            self.assertEqual(
-                json.loads(debug[0].split(" ", 1)[1])["invocation_id"],
-                diagnostic["trace"],
+            self.assertCountEqual(
+                [line.split(" ", 1)[0] for line in debug],
+                ["GAME_LINK_TRACE", "GAME_LINK_OUTPUT"],
             )
+            for line in debug:
+                self.assertNotIn("PrivateRoleFixture", line)
+                self.assertNotIn(fixture.SENTINEL, line)
+                self.assertEqual(
+                    json.loads(line.split(" ", 1)[1])["invocation_id"],
+                    diagnostic["trace"],
+                )
             return diagnostic
 
         await invoke(

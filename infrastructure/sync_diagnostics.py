@@ -5,9 +5,10 @@ from __future__ import annotations
 import copy
 import re
 from collections import OrderedDict
+from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
-from time import monotonic
+from dataclasses import dataclass, field
+from time import monotonic, perf_counter_ns
 
 from ..yomihime_game_link_sdk.errors import AccessDenied, OperationTimeout
 
@@ -78,6 +79,7 @@ class _Context:
     origin: str
     started: float
     trace: dict | None = None
+    active_stages: dict = field(default_factory=dict)
     pending_warning: tuple | None = None
     terminal: bool = False
     http_failure: dict | None = None
@@ -87,6 +89,103 @@ class _Context:
 
 
 _current = ContextVar("runtime_diagnostic", default=None)
+_output_timing = ContextVar("command_output_timing", default=None)
+
+
+@contextmanager
+def measure_stage(name, *, declaration=None):
+    """Record active wall time (union of intervals) and cumulative work per trace."""
+    context = _output_timing.get() or _current.get()
+    if (
+        name
+        not in {
+            "auth",
+            "http",
+            "oauth_http",
+            "cache_lookup",
+            "cache_put",
+            "cache_batch_read",
+            "cache_decode",
+            "cache_authorize",
+            "diagnostic_write",
+            "diagnostic_emit",
+            "render",
+            "bitmap_render",
+            "host_send",
+            "host_event_send",
+        }
+        or context is None
+        or context.trace is None
+        or context.terminal
+    ):
+        yield
+        return
+    if declaration is not None:
+        # Only pass identifiers validated against the source/event declarations.
+        if (
+            name not in {"http", "oauth_http", "diagnostic_emit"}
+            or type(declaration) is not str
+            or not _LABEL.fullmatch(declaration)
+        ):
+            yield
+            return
+        name = f"{name}.{declaration}"
+        retained = (
+            context.trace.get("stage_timings", {}).keys() | context.active_stages.keys()
+        )
+        if (
+            name not in retained
+            and sum(item.startswith(name.split(".", 1)[0] + ".") for item in retained)
+            >= 32
+        ):
+            yield
+            return
+    started = perf_counter_ns()
+    active = context.active_stages
+    count, first = active.get(name, (0, started))
+    active[name] = (count + 1, first)
+    try:
+        yield
+    finally:
+        finished = perf_counter_ns()
+        count, first = active[name]
+        if count == 1:
+            del active[name]
+        else:
+            active[name] = (count - 1, first)
+        if not context.terminal:
+            totals = context.trace.setdefault("stage_timings", {}).setdefault(
+                name, {"count": 0, "wall_us": 0, "cumulative_us": 0}
+            )
+            totals["count"] += 1
+            totals["cumulative_us"] += (finished - started) // 1000
+            if count == 1:
+                totals["wall_us"] += (finished - first) // 1000
+
+
+def record_cache_sqlite_read(queue_ns, worker_ns):
+    """Per-job cumulative time. Concurrent callers can overlap in the queue."""
+    context = _current.get()
+    if context is None or context.trace is None or context.terminal:
+        return
+    totals = context.trace.setdefault(
+        "cache_sqlite", {"jobs": 0, "queue_us": 0, "worker_us": 0}
+    )
+    totals["jobs"] += 1
+    totals["queue_us"] += queue_ns // 1000
+    totals["worker_us"] += worker_ns // 1000
+
+
+def record_cache_batch_results(results):
+    """Count the statuses returned after the binding's final authority check."""
+    context = _current.get()
+    if context is None or context.trace is None or context.terminal:
+        return
+    totals = context.trace.setdefault("cache_batch_results", {})
+    for lookup in results:
+        status = lookup.status.value
+        if status in {"hit", "miss", "expired", "rejected"}:
+            totals[status] = totals.get(status, 0) + 1
 
 
 def defer_failure_report(invocation_id, sink, event):
@@ -130,6 +229,39 @@ class SyncDiagnostics:
         self._warning_sink = warning_sink
         self._trace_sink = trace_sink
         self._trace_enabled = trace_enabled
+
+    @contextmanager
+    def command_output(self, invocation_id):
+        # The gateway has already finalized its trace when Core dispatches output.
+        # Only continue an existing public command trace; never create a private one.
+        trace = self._attempts.get(invocation_id)
+        if self._closed or not trace or trace["origin"] != "command":
+            yield
+            return
+        context = _Context(self, invocation_id, "command", monotonic(), trace={})
+        token = _output_timing.set(context)
+        try:
+            yield
+        finally:
+            context.terminal = True
+            _output_timing.reset(token)
+            timings = context.trace.get("stage_timings")
+            if timings:
+                trace.setdefault("stage_timings", {}).update(timings)
+                try:
+                    if self._trace_sink and (
+                        self._trace_enabled is None or self._trace_enabled()
+                    ):
+                        self._trace_sink(
+                            {
+                                "invocation_id": invocation_id,
+                                "origin": "command",
+                                "command_output_timings": copy.deepcopy(timings),
+                            }
+                        )
+                except Exception:
+                    # A telemetry sink cannot change a completed send.
+                    pass
 
     def activate(
         self,

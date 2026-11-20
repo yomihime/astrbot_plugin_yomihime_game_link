@@ -79,11 +79,23 @@ class LookupFailures:
         self.stage = self.source = self.last_status = None
         self.stage_started = self.started
         self.failures = {}
+        self.stage_ms = {}
+        self._timed_stage = None
 
     def begin(self, source, stage):
+        self.end_stage()
+        self._timed_stage = stage
         self.source, self.stage = source, stage
         self.last_status = None
         self.stage_started = monotonic()
+
+    def end_stage(self):
+        if self._timed_stage is not None:
+            stage = self._timed_stage
+            self.stage_ms[stage] = self.stage_ms.get(stage, 0) + _elapsed(
+                self.stage_started
+            )
+            self._timed_stage = None
 
     def wrap(self, http):
         failures = self

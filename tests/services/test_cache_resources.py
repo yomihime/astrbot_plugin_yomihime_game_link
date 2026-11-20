@@ -65,6 +65,8 @@ from yomihime_game_link_sdk.services import (
     ModuleHandlers,
 )
 from yomihime_game_link_sdk.storage import (
+    CacheLookupStatus,
+    CacheQuery,
     CacheVisibility,
     GrantReference,
     OwnerScope,
@@ -942,6 +944,45 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         foreign_cache = self._cache(user_view, principal_resolver=foreign_resolver)
         self.assertIsNone(await foreign_cache.get("mapped-user"))
+
+    async def test_batch_preserves_order_owner_and_grant_revocation(self):
+        view = self._invocation("alice")
+        cache = self._cache(view)
+        entry = await cache.put("present", {"value": 17}, ttl_seconds=30)
+        queries = (CacheQuery("missing"), CacheQuery("present"))
+        miss, hit = await cache.lookup_many(queries)
+        self.assertIs(miss.status, CacheLookupStatus.MISS)
+        self.assertEqual(hit.entry, entry)
+        other = self._cache(self._invocation("bob"))
+        self.assertTrue(
+            all(
+                row.status is CacheLookupStatus.MISS
+                for row in await other.lookup_many(queries)
+            )
+        )
+        for invalid in (
+            (),
+            queries * 7,
+            [queries[0]],
+            (queries[0], CacheQuery("x", CacheVisibility.PUBLIC)),
+        ):
+            with self.assertRaises(ygl.ParameterError):
+                await cache.lookup_many(invalid)
+
+        grant = await self._grant("batch-read-revocation")
+        view = self._invocation("alice", grant=grant)
+        observed = _ObservedMethod(
+            self.cache_repository, "get_many", pause=True, pause_after=True
+        )
+        bound = self._cache(view, repository=observed, grant_store=self.grants)
+        await bound.put("present", {"value": 18}, ttl_seconds=30)
+        pending = asyncio.create_task(bound.lookup_many(queries))
+        await observed.started.wait()
+        await self._revoke_under_gate(grant)
+        observed.resume.set()
+        with self.assertRaises(ygl.AccessDenied) as error:
+            await pending
+        self.assertEqual(error.exception.code, "grant_revoked")
 
     async def test_principal_lookup_rechecks_exact_view_after_await(self):
         view = self._invocation("external-alice")

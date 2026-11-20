@@ -18,7 +18,7 @@ from .extensions.runtime_bundle import RuntimeBundleError
     "astrbot_plugin_yomihime_game_link",
     "yomihime",
     "如月怜的游戏连结：聚合游戏角色、战绩与资讯。",
-    "0.2.9",
+    "0.2.10",
 )
 class YomihimeGameLink(Star):
     """Hold no canonical SDK, business objects or mutable resource imports."""

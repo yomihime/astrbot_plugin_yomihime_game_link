@@ -354,7 +354,9 @@ class ExternalSourcePolicyHttpTests(unittest.IsolatedAsyncioTestCase):
         self.calls = []
         self.token = "synthetic-private-external-policy-token"
 
-        async def send(method, url, body, headers, timeout_seconds, maximum):
+        async def send(
+            method, url, body, headers, timeout_seconds, maximum, *, source_id
+        ):
             self.calls.append((method, str(url), body, headers))
             return HttpResponse(
                 200,

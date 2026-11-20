@@ -259,7 +259,7 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
             {row["id"] for row in snapshot["worlds"]} - assigned, {3000, 3001}
         )
 
-        await self.runtime.terminate()
+        await terminate_and_drain(self.runtime)
         await self.start(expect_calendar_cached=True)
         logs = runtime_fixture._Event(context=self.context)
         logs.message = '/ygl ff14 logs SyntheticWorld120 "Synthetic Hero"'
@@ -459,7 +459,7 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(newer["error"]["code"], "parameter_error")
                 release.set()
                 self.assertEqual((await first)["error"]["code"], "parameter_error")
-                await self.runtime.terminate()
+                await terminate_and_drain(self.runtime)
 
     async def test_handler_config_snapshot_fixed_selection_and_new_query_new_defaults(
         self,
@@ -621,7 +621,7 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
         choice["selection"].update(
             batch_id=selection["batch_id"], generation=selection["generation"]
         )
-        await self.runtime.terminate()
+        await terminate_and_drain(self.runtime)
         self.transport = FixtureTransport()  # Restart receives a fresh transport too.
         await self.runtime.initialize()
         self.assertEqual(

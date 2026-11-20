@@ -6,8 +6,9 @@ import asyncio
 import io
 import json
 import unittest
+from contextlib import asynccontextmanager
 from dataclasses import replace
-from time import monotonic
+from time import monotonic, time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -23,7 +24,19 @@ from ygl_test_subject.modules.ff14.features.fflogs import (
 )
 from ygl_test_subject.modules.ff14.features.fflogs_catalog import select_character_zones
 from ygl_test_subject.modules.ff14.features.fflogs_evidence import project
-from ygl_test_subject.modules.ff14.features.fflogs_models import EncounterRecord
+from ygl_test_subject.modules.ff14.features.fflogs_history_cache import (
+    HISTORY_CACHE_TTL,
+    _plain,
+    complete_pack_key,
+    complete_packs,
+    history_identity,
+    restore_complete_pack,
+)
+from ygl_test_subject.modules.ff14.features.fflogs_models import (
+    EncounterRecord,
+    FFLogsPayloadError,
+    PartitionRecord,
+)
 from ygl_test_subject.presentation.command_card import CommandCardRenderer
 
 from tests.integration import test_bound_public_contracts as bound_fixture
@@ -35,7 +48,7 @@ from yomihime_game_link_sdk.errors import (
     InvalidInvocation,
     SourceHttpError,
 )
-from yomihime_game_link_sdk.storage import CacheLookup, CacheLookupStatus
+from yomihime_game_link_sdk.storage import CacheLookup, CacheLookupStatus, CacheQuery
 
 
 class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
@@ -45,7 +58,476 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
     requested = explicit_fixture.ExplicitHistoryTests.requested
     planned_packs = explicit_fixture.ExplicitHistoryTests.planned_packs
 
-    async def test_optional_menu_state_precedes_history_and_reports_cache_hit(self):
+    def large_catalog(self):
+        self.metadata = replace(
+            self.metadata,
+            zones=(
+                *self.metadata.zones[:3],
+                *(
+                    replace(
+                        zone,
+                        partitions=tuple(
+                            PartitionRecord(p, f"标准阵容构成 (Synthetic {p})", p == 1)
+                            for p in range(1, 17)
+                        ),
+                    )
+                    for zone in self.metadata.zones[3:]
+                ),
+            ),
+        )
+        keys = tuple(key for group in self.planned_packs() for key in group)
+        self.assertEqual(len(keys), 163)
+        identity = history_identity(
+            self.source,
+            self.role,
+            explicit_fixture.VARIABLES,
+            self.metadata,
+            self.owner,
+        )
+        groups = complete_packs(self.metadata, keys)
+        return [(complete_pack_key(identity, group), group) for group in groups]
+
+    def omit_rankings(self, scopes):
+        targets = {(key[0], key[2]) for key in scopes}
+        original = self.fetch
+
+        async def fetch(request):
+            response = await original(request)
+            variables = json.loads(request.body)["variables"]
+            value = json.loads(response.body)
+            character = value["data"]["characterData"]["character"]
+            for alias in tuple(character):
+                if (
+                    alias.startswith("z")
+                    and (variables[alias], variables.get("p" + alias[1:])) in targets
+                ):
+                    del character[alias]
+            return SimpleNamespace(status_code=200, body=json.dumps(value).encode())
+
+        self.scope.http.fetch = fetch
+
+    async def test_two_default_zones_share_refresh_when_their_history_keys_overlap(
+        self,
+    ):
+        compact = self.large_catalog()
+        first, members = compact[0]
+        self.omit_rankings(members[:1])
+        incomplete = self.scope.http.fetch
+        entered, release, waiting = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        second_requests = []
+        lock_keys = []
+        refresh = self.handler._refresh
+
+        @asynccontextmanager
+        async def observe_refresh(key, deadline):
+            if key[0] == "history":
+                lock_keys.append(key)
+                if len(lock_keys) == 2:
+                    waiting.set()
+            async with refresh(key, deadline) as acquired:
+                yield acquired
+
+        self.handler._refresh = observe_refresh
+
+        async def first_fetch(request):
+            if request.source_id == self.source:
+                entered.set()
+                await release.wait()
+            return await incomplete(request)
+
+        async def second_fetch(request):
+            if request.source_id == self.source:
+                second_requests.append(json.loads(request.body))
+            return await self.fetch(request)
+
+        def start(zone, fetch):
+            scope = SimpleNamespace(
+                cache=self.scope.cache, http=SimpleNamespace(fetch=fetch)
+            )
+            return asyncio.create_task(
+                self.handler._catalog_rankings(
+                    scope,
+                    self.source,
+                    replace(self.role, zone_id=zone),
+                    self.metadata,
+                    explicit_fixture.VARIABLES,
+                    self.handler._lifecycle,
+                    cache_owner=self.owner,
+                )
+            )
+
+        tasks = [start(73, first_fetch)]
+        try:
+            async with asyncio.timeout(5):
+                await entered.wait()
+                tasks.append(start(74, second_fetch))
+                await waiting.wait()
+            self.assertEqual(lock_keys[0], lock_keys[1])
+            self.assertFalse(tasks[1].done())
+            self.assertFalse(second_requests)
+            release.set()
+            partial, full = await asyncio.gather(*tasks)
+        finally:
+            release.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.assertFalse(partial.catalog_complete)
+        self.assertTrue(full.catalog_complete)
+        self.assertEqual(full.history_cache_hits, 162)
+        self.assertEqual(
+            self.requested(second_requests), [(members[0][0], members[0][2])]
+        )
+        stored = (await self.scope.cache.lookup(CacheQuery(first))).entry
+        restored, _ = restore_complete_pack(stored.payload, first, members)
+        self.assertEqual(set(restored), set(members))
+
+    async def test_distinct_sources_and_owners_can_refresh_while_first_is_in_flight(
+        self,
+    ):
+        tasks = []
+
+        async def start_and_wait(source, owner):
+            entered = asyncio.Event()
+
+            async def fetch(request):
+                if request.source_id != source:
+                    raise OSError("synthetic menu unavailable")
+                entered.set()
+                await asyncio.Future()
+
+            scope = SimpleNamespace(
+                cache=self.contract._cache(owner), http=SimpleNamespace(fetch=fetch)
+            )
+            tasks.append(
+                asyncio.create_task(
+                    self.handler._catalog_rankings(
+                        scope,
+                        source,
+                        self.role,
+                        self.metadata,
+                        explicit_fixture.VARIABLES,
+                        self.handler._lifecycle,
+                        cache_owner=owner,
+                    )
+                )
+            )
+            await entered.wait()
+
+        try:
+            async with asyncio.timeout(5):
+                await start_and_wait(self.source, self.owner)
+                await start_and_wait(self.source, self.contract._invocation("bob"))
+                await start_and_wait("fflogs_public_global", self.owner)
+            self.assertTrue(all(not task.done() for task in tasks))
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def test_sparse_anchor_reuses_every_valid_scope_without_rewriting(self):
+        compact = self.large_catalog()
+        _, members = compact[0]
+        failed = members[:1]
+        self.omit_rankings(failed)
+        first = await self.collect()
+        self.assertFalse(first.catalog_complete)
+        self.calls.clear()
+        writes = self.operations["put"]
+        lookup = self.scope.cache.lookup
+        reads = []
+
+        async def observe(query):
+            reads.append(query.key)
+            return await lookup(query)
+
+        self.scope.cache.lookup = observe
+        second = await self.collect()
+        self.assertEqual(second.groups, first.groups)
+        self.assertEqual(second.history_cache_hits, 162)
+        self.assertEqual(self.requested(self.calls), [(failed[0][0], failed[0][2])])
+        self.assertEqual(self.operations["put"], writes)
+        self.assertCountEqual(
+            [key for key in reads if key.startswith("fflogs-complete-")],
+            [key for key, _ in compact],
+        )
+        self.assertEqual(
+            sum(key.startswith("fflogs-history-pack-") for key in reads), 1
+        )
+
+    async def test_all_missing_anchor_discovers_siblings_without_proving_a_single_anchor_scope(
+        self,
+    ):
+        compact = self.large_catalog()
+        _, members = compact[0]
+        self.omit_rankings(members)
+        cold = await self.collect()
+        self.calls.clear()
+        hot = await self.collect()
+        self.assertFalse(cold.catalog_complete)
+        self.assertEqual(hot.groups, cold.groups)
+        self.assertEqual(hot.history_cache_hits, 163 - len(members))
+        self.assertCountEqual(
+            self.requested(self.calls), [(k[0], k[2]) for k in members]
+        )
+
+    async def test_sparse_update_preserves_unread_valid_sibling_and_original_date(self):
+        compact = self.large_catalog()
+        first = compact[0][0]
+        key, members = compact[1]
+        await self.collect()
+        lookup = self.scope.cache.lookup
+
+        def dates(entry):
+            return restore_complete_pack(entry.payload, key, members)[1]
+
+        before = dates((await lookup(CacheQuery(key))).entry)
+
+        async def undiscovered(query):
+            if query.key == first:
+                return CacheLookup(CacheLookupStatus.MISS)
+            return await lookup(query)
+
+        self.scope.cache.lookup = undiscovered
+        self.omit_rankings(members[:1])
+        partial = await self.collect()
+        self.assertFalse(partial.catalog_complete)
+        self.assertEqual(partial.history_cache_hits, 0)
+        after = dates((await lookup(CacheQuery(key))).entry)
+        self.assertEqual(after[members[0]], before[members[0]])
+        self.assertGreater(after[members[1]], before[members[1]])
+        self.scope.cache.lookup = lookup
+        self.calls.clear()
+        self.assertEqual((await self.collect()).history_cache_hits, 163)
+        self.assertFalse(self.calls)
+
+    async def test_sparse_anchor_never_replaces_corrupt_unverified_siblings(self):
+        compact = self.large_catalog()
+        first, members = compact[0]
+        await self.collect()
+        lookup, put = self.scope.cache.lookup, self.scope.cache.put
+        original = (await lookup(CacheQuery(first))).entry
+        writes = []
+
+        async def corrupt(query):
+            result = await lookup(query)
+            if query.key == first:
+                return SimpleNamespace(
+                    status=result.status,
+                    entry=SimpleNamespace(
+                        expires_at=original.expires_at, payload={"version": "bad"}
+                    ),
+                )
+            return result
+
+        async def observe(key, payload, **kwargs):
+            writes.append(key)
+            return await put(key, payload, **kwargs)
+
+        self.omit_rankings(members[:1])
+        self.scope.cache = SimpleNamespace(lookup=corrupt, put=observe)
+        self.assertFalse((await self.collect()).catalog_complete)
+        self.assertNotIn(first, writes)
+        self.assertEqual((await lookup(CacheQuery(first))).entry, original)
+
+    async def test_revocation_during_partial_sibling_merge_stops_publication(self):
+        compact = self.large_catalog()
+        first = compact[0][0]
+        missing, members = compact[1]
+        lookup, put = self.scope.cache.lookup, self.scope.cache.put
+        writes = []
+
+        async def revoke(query):
+            if query.key == missing:
+                self.contract.issuer.release(self.owner)
+            return await lookup(query)
+
+        async def observe(key, payload, **kwargs):
+            writes.append(key)
+            return await put(key, payload, **kwargs)
+
+        self.omit_rankings(members[:1])
+        self.scope.cache = SimpleNamespace(lookup=revoke, put=observe)
+        with self.assertRaises(PermissionError):
+            await self.collect()
+        self.assertNotIn(first, writes)
+        self.assertFalse(writes)
+
+    async def test_complete_slices_migrate_existing_legacy_without_fetch_or_renewal(
+        self,
+    ):
+        compact = self.large_catalog()
+        lookup, put = self.scope.cache.lookup, self.scope.cache.put
+        reads, writes, payloads = [], [], {}
+
+        async def observe_read(query):
+            reads.append(query.key)
+            return await lookup(query)
+
+        async def observe_write(key, payload, **kwargs):
+            writes.append(key)
+            payloads[key] = payload
+            return await put(key, payload, **kwargs)
+
+        self.scope.cache = SimpleNamespace(lookup=observe_read, put=observe_write)
+        with patch(
+            "ygl_test_subject.modules.ff14.features.fflogs_history_cache.complete_packs",
+            return_value=(),
+        ):
+            original = await self.collect()
+        self.assertTrue(original.catalog_complete)
+        legacy_dates = sorted(
+            entry["snapshot"]["fetched_at"]
+            for payload in payloads.values()
+            for entry in payload["entries"]
+        )
+        self.calls.clear()
+        writes.clear()
+        migrated = await self.collect()
+        self.assertEqual(migrated.groups, original.groups)
+        self.assertEqual(migrated.history_cache_hits, 163)
+        self.assertFalse(self.calls)
+        self.assertEqual(set(writes), {key for key, _ in compact})
+        self.assertEqual(writes[-1], compact[0][0])
+        self.assertEqual(
+            sorted(
+                entry[1] for key, _ in compact for entry in payloads[key]["entries"]
+            ),
+            legacy_dates,
+        )
+        reads.clear()
+        writes.clear()
+        hot = await self.collect()
+        self.assertEqual(hot.groups, original.groups)
+        self.assertCountEqual(reads, [key for key, _ in compact])
+        self.assertFalse(self.calls)
+        self.assertFalse(writes)
+        first, planned = compact[0]
+        raw = _plain(payloads[first])
+        raw["entries"][0][1] = time() - HISTORY_CACHE_TTL
+        values, dates = restore_complete_pack(raw, first, planned)
+        self.assertNotIn(planned[0], values)
+        self.assertNotIn(planned[0], dates)
+        self.assertEqual(len(values), len(planned) - 1)
+        raw["entries"].reverse()
+        with self.assertRaises(FFLogsPayloadError):
+            restore_complete_pack(raw, first, planned)
+
+    async def test_batch_reads_survive_missing_anchor_and_refetch_only_expired_members(
+        self,
+    ):
+        compact = self.large_catalog()
+        batches = []
+
+        async def lookup_many(queries):
+            batches.append(tuple(q.key for q in queries))
+            return await self.cache.lookup_many(queries)
+
+        self.scope.cache.lookup_many = lookup_many
+        original = await self.collect()
+        self.assertTrue(original.catalog_complete)
+        self.calls.clear()
+        batches.clear()
+        hot = await self.collect()
+        self.assertEqual(hot.groups, original.groups)
+        self.assertEqual(hot.history_cache_hits, 163)
+        self.assertFalse(self.calls)
+        self.assertEqual(batches, [tuple(key for key, _ in compact)])
+
+        anchor, missing = compact[0]
+        sibling, members = compact[1]
+        await self.cache.invalidate(anchor)
+        entry = await self.cache.get(sibling)
+        payload = _plain(entry.payload)
+        payload["entries"][0][1] = time() - HISTORY_CACHE_TTL - 1
+        await self.cache.put(sibling, payload, ttl_seconds=HISTORY_CACHE_TTL)
+        repaired = await self.collect()
+        expected = (*missing, members[0])
+        self.assertCountEqual(
+            self.requested(self.calls), [(k[0], k[2]) for k in expected]
+        )
+        self.assertEqual(repaired.history_cache_hits, 163 - len(expected))
+        self.assertEqual(repaired.groups, original.groups)
+
+    async def test_compact_miss_and_bad_slice_use_legacy_or_only_fetch_missing_members(
+        self,
+    ):
+        compact = self.large_catalog()
+        original = await self.collect()
+        self.assertTrue(original.catalog_complete)
+        self.calls.clear()
+        key, members = compact[1]
+        lookup = self.scope.cache.lookup
+
+        async def corrupt(query):
+            result = await lookup(query)
+            if query.key != key:
+                return result
+            self.assertIs(result.status, CacheLookupStatus.HIT)
+            return SimpleNamespace(
+                status=result.status,
+                entry=SimpleNamespace(
+                    expires_at=result.entry.expires_at, payload={"version": "invalid"}
+                ),
+            )
+
+        self.scope.cache.lookup = corrupt
+        repaired = await self.collect()
+        self.assertEqual(repaired.groups, original.groups)
+        self.assertEqual(repaired.history_cache_hits, 163 - len(members))
+        self.assertEqual(
+            set(self.requested(self.calls)), {(k[0], k[2]) for k in members}
+        )
+        self.calls.clear()
+        self.scope.cache.lookup = lookup
+        self.assertEqual((await self.collect()).history_cache_hits, 163)
+        self.assertFalse(self.calls)
+        self.contract.issuer.release(self.owner)
+        with self.assertRaises((PermissionError, RuntimeError)):
+            await self.collect()
+        self.assertFalse(self.calls)
+
+    async def test_interrupted_slice_publication_remains_readable_from_legacy(self):
+        compact = self.large_catalog()
+        put = self.scope.cache.put
+        seen = []
+
+        async def fail_second_slice(key, payload, **kwargs):
+            seen.append(key)
+            if key == compact[2][0]:
+                raise OSError("synthetic write failure")
+            return await put(key, payload, **kwargs)
+
+        self.scope.cache.put = fail_second_slice
+        original = await self.collect()
+        self.assertTrue(original.catalog_complete)
+        self.assertNotIn(compact[0][0], seen)
+        self.assertIn(compact[1][0], seen)
+        self.calls.clear()
+        self.scope.cache.put = put
+        migrated = await self.collect()
+        self.assertEqual(migrated.groups, original.groups)
+        self.assertEqual(migrated.history_cache_hits, 163)
+        self.assertFalse(self.calls)
+
+    async def test_revoked_during_compact_write_does_not_publish_or_fall_back(self):
+        compact = self.large_catalog()
+        put = self.scope.cache.put
+        writes = []
+
+        async def revoke_before_second_write(key, payload, **kwargs):
+            writes.append(key)
+            if key == compact[2][0]:
+                self.contract.issuer.release(self.owner)
+            return await put(key, payload, **kwargs)
+
+        self.scope.cache.put = revoke_before_second_write
+        with self.assertRaises(PermissionError):
+            await self.collect()
+        self.assertEqual(writes, [compact[1][0], compact[2][0]])
+
+    async def test_optional_menu_overlaps_history_and_reports_cache_hit(self):
         from tests.modules.ff14.test_duty_order import payload
 
         events = []
@@ -54,20 +536,22 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
         )
         original = self.scope.http.fetch
         menu_calls = []
+        history_started = asyncio.Event()
 
         async def fetch(request):
             if request.source_id == "xivapi_items":
-                self.assertEqual(self.calls, [])
-                self.assertEqual(self.operations["lookup"], 0)
+                async with asyncio.timeout(1):
+                    await history_started.wait()
                 menu_calls.append(request)
                 return SimpleNamespace(status_code=200, body=payload())
+            history_started.set()
             return await original(request)
 
         self.scope.http.fetch = fetch
         first = await self.collect(evidence)
         second = await self.collect(evidence)
         states = [event for event in events if event[0] == "FF14DutyOrderState"]
-        self.assertEqual(events[0][0], "FF14DutyOrderState")
+        self.assertEqual(events[-1][0], "FF14HistorySummary")
         self.assertEqual([event[2]["cached"] for event in states], [False, True])
         self.assertTrue(all(event[1]["complete"] for event in states))
         self.assertEqual(len(menu_calls), 1)
@@ -273,12 +757,13 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
 
         async def altered(request):
             response = await original(request)
-            if len(self.calls) == 10:
+            if len(self.calls) == 5:
                 raise OSError("Synthetic last batch failure")
             if len(self.calls) == 1:
                 value = json.loads(response.body)
                 character = value["data"]["characterData"]["character"]
                 character.pop("z0")
+                value["errors"] = [{"path": ["characterData", "character", "z0"]}]
                 character["z1"] = {"malformed": True}
                 return SimpleNamespace(status_code=200, body=json.dumps(value).encode())
             return response
@@ -296,7 +781,7 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
                 summary["request_failed"],
                 summary["not_queried"],
             ),
-            (111, 111, 1, 1, 3, 0),
+            (111, 111, 1, 1, 15, 0),
         )
         self.assertGreater(summary["fresh_positive"], 0)
         self.assertGreater(summary["fresh_empty"], 0)
@@ -320,28 +805,59 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rate_limit_stops_queued_batches_without_inventing_coverage(self):
         self.scope.cache = None
-        calls = 0
-        menu_calls = 0
+        for code, status in (("upstream_error", 429), ("rate_limited", None)):
+            with self.subTest(code=code):
+                calls = []
 
-        async def limited(request):
-            nonlocal calls, menu_calls
-            if request.source_id == "xivapi_items":
-                menu_calls += 1
-            else:
-                calls += 1
-            raise SourceHttpError("rate_limited", status_code=429)
+                async def limited(request):
+                    calls.append(request.source_id)
+                    raise SourceHttpError(code, status_code=status)
 
-        self.scope.http.fetch = limited
-        events, evidence = self.summary()
-        result = await self.collect(evidence)
-        summary = events[-1][1]
-        self.assertEqual(calls, 1)
-        self.assertEqual(menu_calls, 1)
-        self.assertEqual(
-            (summary["attempted"], summary["request_failed"], summary["not_queried"]),
-            (12, 12, 99),
-        )
-        self.assertFalse(result.catalog_complete)
+                self.scope.http.fetch = limited
+                events, evidence = self.summary()
+                result = await self.collect(evidence)
+                summary = events[-1][1]
+                self.assertEqual(calls.count(self.source), 1)
+                self.assertEqual(
+                    (
+                        summary["attempted"],
+                        summary["request_failed"],
+                        summary["not_queried"],
+                    ),
+                    (24, 24, 87),
+                )
+                self.assertFalse(result.catalog_complete)
+
+    async def test_size_fallback_completes_all_scopes_with_smaller_batches(self):
+        self.scope.cache = None
+        original = self.fetch
+        reference = await self.collect()
+        for mode in ("parser", "transport"):
+            with self.subTest(mode=mode):
+                sizes = []
+
+                async def fetch(request):
+                    if request.source_id != self.source:
+                        raise OSError("Synthetic menu unavailable")
+                    variables = json.loads(request.body)["variables"]
+                    sizes.append(sum(key.startswith("z") for key in variables))
+                    if sizes[-1] > 12:
+                        if mode == "parser":
+                            return SimpleNamespace(
+                                status_code=200, body=b"x" * 1_000_001
+                            )
+                        raise SourceHttpError("response_too_large")
+                    return await original(request)
+
+                self.scope.http.fetch = fetch
+                events, evidence = self.summary()
+                result = await self.collect(evidence)
+                self.assertEqual(sizes[0], 24)
+                self.assertTrue(all(size <= 12 for size in sizes[1:]))
+                self.assertEqual(sum(sizes[1:]), 111)
+                self.assertTrue(result.catalog_complete)
+                self.assertEqual(result.groups, reference.groups)
+                self.assertEqual(events[-1][1]["attempted"], 111)
 
     async def test_production_invoke_consumes_context_deadline_and_validates_result(
         self,
@@ -355,7 +871,7 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
         async def fetch(request):
             if "FF14CatalogCharacter" in json.loads(request.body)["query"]:
                 response = await catalog_fetch(request)
-                clock[0] += 4
+                clock[0] += 8
                 await asyncio.sleep(0)
                 return response
             return await base.fetch(request)
@@ -416,6 +932,9 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
                 type(contract.runtime.repositories.cache), "get", backend_failure
             ),
             patch.object(
+                type(contract.runtime.repositories.cache), "get_many", backend_failure
+            ),
+            patch.object(
                 type(contract.runtime.repositories.cache), "put", backend_failure
             ),
         ):
@@ -431,7 +950,7 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
             raise OSError("synthetic backend failure after revocation")
 
         with patch.object(
-            type(contract.runtime.repositories.cache), "get", revoked_lookup
+            type(contract.runtime.repositories.cache), "get_many", revoked_lookup
         ):
             with self.assertRaises(InvalidInvocation):
                 await self.collect()
@@ -482,6 +1001,7 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(type(contract.runtime.repositories.cache), "get", fail),
+            patch.object(type(contract.runtime.repositories.cache), "get_many", fail),
             patch.object(type(contract.runtime.repositories.cache), "put", fail),
         ):
             result = await handler.invoke(

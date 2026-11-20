@@ -36,6 +36,7 @@ from ..core.registry import RegisteredModule, Registry
 from ..core.task_scope import TaskScope
 from ..infrastructure.http import SourceHttpError, SourceHttpService
 from ..infrastructure.sqlite.repositories import SQLiteRepositories
+from ..infrastructure.sync_diagnostics import measure_stage, record_cache_batch_results
 from ..yomihime_game_link_sdk.contexts import (
     InvocationOrigin,
     InvocationView,
@@ -835,14 +836,33 @@ class _BoundCache:
 
     @public_boundary("service")
     async def lookup(self, request: CacheQuery) -> CacheLookup:
-        await self.__check()
-        try:
-            result = await self.__cache.lookup(request)
-        except Exception:
+        with measure_stage("cache_lookup"):
             await self.__check()
-            raise
-        await self.__check()
-        return result
+            try:
+                result = await self.__cache.lookup(request)
+            except Exception:
+                await self.__check()
+                raise
+            await self.__check()
+            return result
+
+    @public_boundary("service")
+    async def lookup_many(
+        self, requests: tuple[CacheQuery, ...]
+    ) -> tuple[CacheLookup, ...]:
+        with measure_stage("cache_batch_read"):
+            with measure_stage("cache_authorize"):
+                await self.__check()
+            try:
+                results = await self.__cache.lookup_many(requests)
+            except Exception:
+                with measure_stage("cache_authorize"):
+                    await self.__check()
+                raise
+            with measure_stage("cache_authorize"):
+                await self.__check()
+            record_cache_batch_results(results)
+            return results
 
     @public_boundary("service")
     async def put(
@@ -853,20 +873,21 @@ class _BoundCache:
         ttl_seconds: float,
         visibility: CacheVisibility | None = None,
     ):
-        await self.__check()
-        if type(key) is str and key.startswith("core-collage-public-v1-"):
-            raise ParameterError("cache key is reserved")
-        if visibility is CacheVisibility.PUBLIC and not self.__public_write:
-            raise InvocationBindingError()
-        try:
-            result = await self.__cache.put(
-                key, payload, ttl_seconds=ttl_seconds, visibility=visibility
-            )
-        except Exception:
+        with measure_stage("cache_put"):
             await self.__check()
-            raise
-        await self.__check()
-        return result
+            if type(key) is str and key.startswith("core-collage-public-v1-"):
+                raise ParameterError("cache key is reserved")
+            if visibility is CacheVisibility.PUBLIC and not self.__public_write:
+                raise InvocationBindingError()
+            try:
+                result = await self.__cache.put(
+                    key, payload, ttl_seconds=ttl_seconds, visibility=visibility
+                )
+            except Exception:
+                await self.__check()
+                raise
+            await self.__check()
+            return result
 
 
 @dataclass(frozen=True, slots=True)

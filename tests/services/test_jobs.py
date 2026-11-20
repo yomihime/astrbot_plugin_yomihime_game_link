@@ -1112,7 +1112,7 @@ class DurableJobsTests(unittest.IsolatedAsyncioTestCase):
         calls = []
         token = "synthetic-job-wire-key"
 
-        async def send(method, url, body, headers, timeout, maximum):
+        async def send(method, url, body, headers, timeout, maximum, *, source_id):
             calls.append((method, str(url), headers))
             return HttpResponse(
                 200, {}, json.dumps({"echo": token, "ok": True}).encode()

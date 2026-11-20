@@ -165,6 +165,23 @@ def contrast_ratio(first: str, second: str) -> float:
     return (high + 0.05) / (low + 0.05)
 
 
+def _least_contrasting_pixel(patch, mask, face):
+    """Match the lowest contrast at nonzero ink, breaking ties by RGB."""
+    cached = {}
+    best = None
+    for color, alpha in zip(patch.getdata(), mask.getdata()):
+        if alpha:
+            ratio = cached.get(color)
+            if ratio is None:
+                ratio = contrast_ratio(face, "#%02x%02x%02x" % color)
+                if len(cached) < 256:
+                    cached[color] = ratio
+            candidate = (ratio, color)
+            if best is None or candidate < best:
+                best = candidate
+    return best[1]
+
+
 def needs_shadow(ratio: float) -> bool:
     return ratio < CONTRAST_THRESHOLD
 
@@ -515,25 +532,22 @@ class RichSession:
                 _fail()
             # Reserve before allocating or scanning the corresponding raster.
             self._charge(pixels)
-            patch = stack.enter_context(self.image.crop(bounds))
-            actual = None
-            best = None
-            # Streaming scan: no per-pixel Python container or unbounded color set.
-            cached = {}
-            for color, alpha in zip(patch.getdata(), mask.getdata()):
-                if not alpha:
-                    continue
-                ratio = cached.get(color)
-                if ratio is None:
-                    ratio = contrast_ratio(face, "#%02x%02x%02x" % color)
-                    if len(cached) < 256:
-                        cached[color] = ratio
-                candidate = (ratio, color)
-                if best is None or candidate < best:
-                    best, actual = candidate, color
-            background = (
-                "#%02x%02x%02x" % actual if actual is not None else face.lower()
-            )
+            sample_bounds = (x + ink[0], y + ink[1], x + ink[2], y + ink[3])
+            with self.image.crop(sample_bounds) as patch:
+                # Both the flat-color probe and any subsequent masked scan fit
+                # within the original full-patch scan reservation.
+                colors = (
+                    patch.getcolors(maxcolors=1)
+                    if 2 * patch.width * patch.height <= pixels
+                    else None
+                )
+                if colors is not None:
+                    # Every ink pixel lies on the same background.
+                    actual = colors[0][1]
+                else:
+                    with mask.crop(ink) as ink_mask:
+                        actual = _least_contrasting_pixel(patch, ink_mask, face)
+            background = "#%02x%02x%02x" % actual
             ratio = contrast_ratio(face, background)
             shadow = ink is not None and needs_shadow(ratio)
             gold = ink is not None and span.grade is Grade.GOLD

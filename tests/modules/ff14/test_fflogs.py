@@ -385,6 +385,146 @@ def _output_responses(*html: bytes) -> list[dict | bytes]:
     return [_output_schema(), _output_metadata(), *html]
 
 
+class RefreshTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cold_directory_coalesces_and_hot_character_visibility_is_live(self):
+        from types import SimpleNamespace
+
+        from yomihime_game_link_sdk import AccessDenied, InvocationOrigin
+
+        http = _FakeHttp(
+            [
+                *_character_responses(realm="cn", character=_character(partition=5)),
+                _character(hidden=True),
+            ]
+        )
+        diagnostics = _Diagnostics()
+        lookup = FFLogsCharacterLookup(_services(http, diagnostics=diagnostics))
+        self.addCleanup(lookup.close)
+        entered, release = asyncio.Event(), asyncio.Event()
+        checks = []
+        revoked = False
+        original = http.fetch
+
+        async def checked(source):
+            checks.append(source)
+            if revoked:
+                raise AccessDenied("source_revoked")
+
+        async def delayed(request):
+            if b"FF14WorldRegions" in request.body:
+                entered.set()
+                await release.wait()
+            return await original(request)
+
+        http.budget = checked
+        http.fetch = delayed
+        context = SimpleNamespace(origin=InvocationOrigin.WEB_PUBLIC)
+        params = dict(
+            realm="cn",
+            server="Cerberus",
+            character="Synthetic Hero",
+            zone_id=73,
+            difficulty=101,
+            partition=5,
+        )
+        async with asyncio.timeout(2):
+            owner = asyncio.create_task(lookup.invoke(context, params))
+            await entered.wait()
+            waiter = asyncio.create_task(lookup.invoke(context, params))
+            cancelled = asyncio.create_task(lookup.invoke(context, params))
+            await asyncio.sleep(0)
+            cancelled.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await cancelled
+            release.set()
+            first, second = await asyncio.gather(owner, waiter)
+        self.assertIs(first.status, ResultStatus.SUCCESS)
+        self.assertIs(second.error.code, ErrorCode.NOT_PUBLIC)
+        self.assertEqual(len(http.requests), 4)
+        self.assertEqual(checks, [FFLOGS_CN_SOURCE])
+        summaries = [
+            event["payload"]["payload"]
+            for event in diagnostics.events
+            if event["event_id"] == "FF14RequestSummary"
+        ]
+        self.assertEqual(
+            [entry["outcome"] for entry in summaries], ["success", "error"]
+        )
+        for entry in summaries:
+            self.assertEqual(
+                entry["cumulative_http_ms"],
+                sum(op["elapsed_ms"] for op in entry["operations"]),
+            )
+            self.assertIn("authentication", entry["stage_ms"])
+            self.assertIn("character_query", entry["stage_ms"])
+            self.assertIn("server_directory", entry["stage_ms"])
+            self.assertGreaterEqual(entry["diagnostic_ms"], 0)
+        ops = {op["operation"]: op for op in summaries[-1]["operations"]}
+        self.assertEqual(
+            (ops["FF14WorldRegions"]["cache"], ops["FF14WorldRegions"]["attempts"]),
+            ("module_hit", 0),
+        )
+        revoked = True
+        with self.assertRaises(AccessDenied):
+            await lookup.invoke(context, params)
+        self.assertEqual(len(http.requests), 4)
+
+    async def test_waiter_revalidates_own_source_after_metadata_refresh(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from tests.modules.ff14.test_fflogs_cards import metadata
+        from yomihime_game_link_sdk import AccessDenied
+
+        entered, release, second_main = (
+            asyncio.Event(),
+            asyncio.Event(),
+            asyncio.Event(),
+        )
+        good = _FakeHttp([_character()])
+        denied = _FakeHttp([_character()])
+        lookup = FFLogsCharacterLookup(_services(good))
+        self.addCleanup(lookup.close)
+        server = SimpleNamespace(name="Cerberus", slug="cerberus", region="CN")
+        params = dict(realm="cn", server="Cerberus", character="Synthetic Hero")
+
+        async def refresh(catalog):
+            entered.set()
+            await release.wait()
+            return parse_output_metadata(metadata()["data"])
+
+        async def revoke(source):
+            raise AccessDenied("grant_revoked")
+
+        denied.budget = revoke
+        fetch = denied.fetch
+
+        async def second_fetch(request):
+            result = await fetch(request)
+            second_main.set()
+            return result
+
+        denied.fetch = second_fetch
+
+        async def query(http):
+            return await lookup._execute(
+                None, params, scope=SimpleNamespace(http=http), resolved_server=server
+            )
+
+        with patch.object(FFLogsCatalog, "load_character_metadata", refresh):
+            async with asyncio.timeout(2):
+                owner = asyncio.create_task(query(good))
+                await entered.wait()
+                waiter = asyncio.create_task(query(denied))
+                await second_main.wait()
+                release.set()
+                self.assertIsNone((await owner).error)
+                with self.assertRaises(AccessDenied):
+                    await waiter
+        self.assertEqual(len(good.requests), 1)
+        self.assertEqual(len(denied.requests), 1)
+
+
 class FFLogsContractTests(unittest.TestCase):
     def test_graphql_envelope_rejects_errors_without_echoing_remote_text(self) -> None:
         with self.assertRaisesRegex(ValueError, "query failed"):

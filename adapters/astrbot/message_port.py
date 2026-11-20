@@ -12,6 +12,7 @@ from ...core.ports import (
     PublicGroupRoute,
     RenderedMessage,
 )
+from ...infrastructure.sync_diagnostics import measure_stage
 from ...yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
 
 ImageFactory = Callable[[bytes], object]
@@ -240,7 +241,8 @@ class AstrBotMessagePort:
         except Exception:
             return MessageReceipt(MessageStatus.FAILED)
         try:
-            sent = await send(chain)
+            with measure_stage("host_event_send"):
+                sent = await send(chain)
         except Exception:
             return MessageReceipt(MessageStatus.UNKNOWN)
         if sent is True:
@@ -349,7 +351,8 @@ class _PreparedHostCommand:
         except Exception:
             return MessageReceipt(MessageStatus.FAILED)
         try:
-            sent = await self.send(self.chain)
+            with measure_stage("host_event_send"):
+                sent = await self.send(self.chain)
         except Exception:
             return MessageReceipt(MessageStatus.UNKNOWN)
         if sent is True:
