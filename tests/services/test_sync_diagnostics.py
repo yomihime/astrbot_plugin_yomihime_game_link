@@ -20,6 +20,7 @@ from ygl_test_subject.infrastructure.sync_diagnostics import (
     SyncDiagnostics,
     emit,
     measure_stage,
+    record_cache_batch_results,
 )
 from ygl_test_subject.modules.ff14.features.calendar_diagnostics import DECLARATION
 from ygl_test_subject.services.diagnostics import (
@@ -44,6 +45,7 @@ from yomihime_game_link_sdk.errors import (
 )
 from yomihime_game_link_sdk.results import ErrorCode, ResultStatus
 from yomihime_game_link_sdk.services import HttpRequest
+from yomihime_game_link_sdk.storage import CacheLookup, CacheLookupStatus
 
 SECRET = "PRIVATE-SENTINEL-https://secret.invalid/?token=secret-C:/private/secret"
 
@@ -241,12 +243,22 @@ class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     def codes(self):
         return [event.get("code") for event in self.attempt()["events"]]
 
+    def test_cache_batch_reports_counts_without_keys_or_values(self):
+        emit("core_start")
+        missing = CacheLookup(CacheLookupStatus.MISS)
+        expired = CacheLookup(CacheLookupStatus.EXPIRED)
+        record_cache_batch_results((missing, expired))
+        record_cache_batch_results((missing,))
+        self.assertEqual(
+            self.attempt()["cache_batch_results"], {"miss": 2, "expired": 1}
+        )
+
     def test_overlapping_http_wall_and_cumulative_survive_event_limit(self):
         emit("core_start")
         for _ in range(MAX_EVENTS):
             emit("http_queue")
         with patch(
-            "ygl_test_subject.infrastructure.sync_diagnostics.monotonic_ns",
+            "ygl_test_subject.infrastructure.sync_diagnostics.perf_counter_ns",
             side_effect=[0, 4_000_000, 10_000_000, 15_000_000],
         ):
             with measure_stage("http"):

@@ -8,7 +8,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from time import monotonic, monotonic_ns
+from time import monotonic, perf_counter_ns
 
 from ..yomihime_game_link_sdk.errors import AccessDenied, OperationTimeout
 
@@ -140,14 +140,14 @@ def measure_stage(name, *, declaration=None):
         ):
             yield
             return
-    started = monotonic_ns()
+    started = perf_counter_ns()
     active = context.active_stages
     count, first = active.get(name, (0, started))
     active[name] = (count + 1, first)
     try:
         yield
     finally:
-        finished = monotonic_ns()
+        finished = perf_counter_ns()
         count, first = active[name]
         if count == 1:
             del active[name]
@@ -174,6 +174,18 @@ def record_cache_sqlite_read(queue_ns, worker_ns):
     totals["jobs"] += 1
     totals["queue_us"] += queue_ns // 1000
     totals["worker_us"] += worker_ns // 1000
+
+
+def record_cache_batch_results(results):
+    """Count the statuses returned after the binding's final authority check."""
+    context = _current.get()
+    if context is None or context.trace is None or context.terminal:
+        return
+    totals = context.trace.setdefault("cache_batch_results", {})
+    for lookup in results:
+        status = lookup.status.value
+        if status in {"hit", "miss", "expired", "rejected"}:
+            totals[status] = totals.get(status, 0) + 1
 
 
 def defer_failure_report(invocation_id, sink, event):

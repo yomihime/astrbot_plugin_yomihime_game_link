@@ -42,7 +42,7 @@ class SQLiteExecutorTests(unittest.IsolatedAsyncioTestCase):
             emit("core_start")
             await self.executor.initialize()
             with patch(
-                "ygl_test_subject.infrastructure.sqlite.executor.monotonic_ns",
+                "ygl_test_subject.infrastructure.sqlite.executor.perf_counter_ns",
                 side_effect=(0, 300_000, 1_000_000),
             ):
                 value = await self.executor.run_read(

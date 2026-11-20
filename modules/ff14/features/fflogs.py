@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 from decimal import Decimal
 from html.parser import HTMLParser
-from time import monotonic, time
+from time import monotonic, perf_counter_ns, time
 from urllib.parse import quote
 from weakref import WeakValueDictionary
 
@@ -561,7 +561,7 @@ class FFLogsCharacterLookup:
             return hit
 
         def accept(index, group, compact_format, cache_key, lookup):
-            decode_started = monotonic()
+            decode_started = perf_counter_ns()
             try:
                 return restore_lookup(index, group, compact_format, cache_key, lookup)
             except (PermissionError, ServiceUnavailable, OperationTimeout):
@@ -570,7 +570,9 @@ class FFLogsCharacterLookup:
                 summary["slice_invalid"] += 1
                 return False
             finally:
-                summary["slice_decode_us"] += int((monotonic() - decode_started) * 1e6)
+                summary["slice_decode_us"] += (
+                    perf_counter_ns() - decode_started
+                ) // 1000
 
         async def read_packs(pending_reads, compact_format):
             restored = False

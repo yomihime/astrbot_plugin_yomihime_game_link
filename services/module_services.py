@@ -36,7 +36,7 @@ from ..core.registry import RegisteredModule, Registry
 from ..core.task_scope import TaskScope
 from ..infrastructure.http import SourceHttpError, SourceHttpService
 from ..infrastructure.sqlite.repositories import SQLiteRepositories
-from ..infrastructure.sync_diagnostics import measure_stage
+from ..infrastructure.sync_diagnostics import measure_stage, record_cache_batch_results
 from ..yomihime_game_link_sdk.contexts import (
     InvocationOrigin,
     InvocationView,
@@ -861,6 +861,7 @@ class _BoundCache:
                 raise
             with measure_stage("cache_authorize"):
                 await self.__check()
+            record_cache_batch_results(results)
             return results
 
     @public_boundary("service")

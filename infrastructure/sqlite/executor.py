@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 from datetime import time as datetime_time
 from decimal import Decimal
 from enum import Enum
-from time import monotonic_ns
+from time import perf_counter_ns
 from types import MappingProxyType
 from typing import Any, TypeVar
 from uuid import UUID
@@ -233,7 +233,7 @@ class SQLiteExecutor:
             await self._ensure_initialized()
             if not measure_cache:
                 return await self._submit("read", callback, "DEFERRED", operation)
-            timing = _ReadTiming(monotonic_ns())
+            timing = _ReadTiming(perf_counter_ns())
             try:
                 return await self._submit(
                     "read", callback, "DEFERRED", operation, timing
@@ -325,7 +325,7 @@ class SQLiteExecutor:
                 continue
             try:
                 if job.timing is not None:
-                    job.timing.started = monotonic_ns()
+                    job.timing.started = perf_counter_ns()
                 result = self._run_job(job)
             except BaseException as exc:
                 self._complete(job, error=exc)
@@ -377,7 +377,7 @@ class SQLiteExecutor:
         self, job: _Job, *, result: Any = None, error: BaseException | None = None
     ) -> None:
         if job.timing is not None:
-            job.timing.finished = monotonic_ns()
+            job.timing.finished = perf_counter_ns()
 
         def finish() -> None:
             with self._state_lock:
