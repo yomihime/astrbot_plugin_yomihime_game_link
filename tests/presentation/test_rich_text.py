@@ -97,9 +97,7 @@ class RichTextTests(unittest.TestCase):
                 mask = probe._mask(probe.plans[0], stack)
                 x, y, *_ = flat.patch_bounds
                 x0, y0, x1, y1 = mask.getbbox()
-                points = [
-                    (cx, cy) for cy in range(y0, y1) for cx in range(x0, x1)
-                ]
+                points = [(cx, cy) for cy in range(y0, y1) for cx in range(x0, x1)]
                 outside = next(p for p in points if mask.getpixel(p) == 0)
                 edge = next(p for p in points if 0 < mask.getpixel(p) < 255)
             probe.close()

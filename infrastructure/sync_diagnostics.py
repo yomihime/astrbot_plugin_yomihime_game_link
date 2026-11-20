@@ -104,6 +104,9 @@ def measure_stage(name, *, declaration=None):
             "oauth_http",
             "cache_lookup",
             "cache_put",
+            "cache_batch_read",
+            "cache_decode",
+            "cache_authorize",
             "diagnostic_write",
             "diagnostic_emit",
             "render",
@@ -158,6 +161,19 @@ def measure_stage(name, *, declaration=None):
             totals["cumulative_us"] += (finished - started) // 1000
             if count == 1:
                 totals["wall_us"] += (finished - first) // 1000
+
+
+def record_cache_sqlite_read(queue_ns, worker_ns):
+    """Per-job cumulative time. Concurrent callers can overlap in the queue."""
+    context = _current.get()
+    if context is None or context.trace is None or context.terminal:
+        return
+    totals = context.trace.setdefault(
+        "cache_sqlite", {"jobs": 0, "queue_us": 0, "worker_us": 0}
+    )
+    totals["jobs"] += 1
+    totals["queue_us"] += queue_ns // 1000
+    totals["worker_us"] += worker_ns // 1000
 
 
 def defer_failure_report(invocation_id, sink, event):

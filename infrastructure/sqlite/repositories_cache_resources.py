@@ -27,6 +27,7 @@ from ...yomihime_game_link_sdk.storage import (
     OwnershipKind,
     ResourceMetadata,
 )
+from ..sync_diagnostics import measure_stage
 from .database import SQLiteDatabase, SQLiteUnitOfWork, SQLiteUnitOfWorkFactory
 
 
@@ -193,35 +194,62 @@ class SQLiteCacheRepository:
         if minimum_source_version is not None:
             minimum_source_version = _validate_source_version(minimum_source_version)
 
-        def _read(unit: SQLiteUnitOfWork) -> tuple[bool, tuple[Any, ...] | None]:
-            row = unit.connection.execute(
-                "SELECT * FROM cache_entries WHERE cache_key=? AND visibility=? "
-                "AND user_id IS ? AND grant_id IS ? AND grant_revision IS ?",
-                self._lookup_params(request),
-            ).fetchone()
-            grant_mismatch = False
-            if row is None and request.visibility.value == "authorized":
-                grant = request.scope.grant
-                assert grant is not None
-                prior = unit.connection.execute(
-                    "SELECT 1 FROM cache_entries WHERE cache_key=? AND visibility='authorized' "
-                    "AND user_id=? AND grant_id=? LIMIT 1",
-                    (request.key, request.scope.user_id, grant.grant_id),
-                ).fetchone()
-                grant_mismatch = prior is not None
-            detached = None
-            if row is not None:
-                detached = (
-                    bool(row["invalidated"]),
-                    row["expires_at"],
-                    int(row["source_version"]),
-                    row["cache_key"],
-                    row["payload_json"],
-                    int(row["revision"]),
-                )
-            return grant_mismatch, detached
+        result = await self.database.executor.run_read(
+            lambda unit: self._read_one(unit, request), measure_cache=True
+        )
+        with measure_stage("cache_decode"):
+            return self._decode_lookup(result, minimum_source_version)
 
-        grant_mismatch, row = await self.database.executor.run_read(_read)
+    async def get_many(self, requests):
+        if type(requests) is not tuple or not 1 <= len(requests) <= 12:
+            raise ValueError("invalid cache batch size")
+        requests = tuple(self._request(request) for request in requests)
+        if any(
+            request.scope != requests[0].scope
+            or request.visibility is not requests[0].visibility
+            for request in requests
+        ):
+            raise ValueError("cache batch must use one scope")
+        # One guarded SQLite job, using the same exact partition predicates and
+        # prior-grant rejection semantics as a single read.
+        rows = await self.database.executor.run_read(
+            lambda unit: tuple(self._read_one(unit, request) for request in requests),
+            measure_cache=True,
+        )
+        with measure_stage("cache_decode"):
+            return tuple(self._decode_lookup(row, None) for row in rows)
+
+    def _read_one(self, unit, request):
+        row = unit.connection.execute(
+            "SELECT * FROM cache_entries WHERE cache_key=? AND visibility=? "
+            "AND user_id IS ? AND grant_id IS ? AND grant_revision IS ?",
+            self._lookup_params(request),
+        ).fetchone()
+        grant_mismatch = False
+        if row is None and request.visibility.value == "authorized":
+            grant = request.scope.grant
+            assert grant is not None
+            prior = unit.connection.execute(
+                "SELECT 1 FROM cache_entries WHERE cache_key=? AND visibility='authorized' "
+                "AND user_id=? AND grant_id=? LIMIT 1",
+                (request.key, request.scope.user_id, grant.grant_id),
+            ).fetchone()
+            grant_mismatch = prior is not None
+        detached = None
+        if row is not None:
+            detached = (
+                bool(row["invalidated"]),
+                row["expires_at"],
+                int(row["source_version"]),
+                row["cache_key"],
+                row["payload_json"],
+                int(row["revision"]),
+            )
+        return grant_mismatch, detached
+
+    @staticmethod
+    def _decode_lookup(result, minimum_source_version):
+        grant_mismatch, row = result
         if grant_mismatch:
             return validate_contract(CacheLookup(CacheLookupStatus.REJECTED))
         if row is None or row[0]:

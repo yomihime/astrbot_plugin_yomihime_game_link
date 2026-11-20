@@ -14,16 +14,18 @@ import queue
 import sqlite3
 import threading
 from collections.abc import Callable
-from dataclasses import fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as datetime_time
 from decimal import Decimal
 from enum import Enum
+from time import monotonic_ns
 from types import MappingProxyType
 from typing import Any, TypeVar
 from uuid import UUID
 
 from ...services.runtime_effect_gate import current_effect_guard
+from ..sync_diagnostics import record_cache_sqlite_read
 from .database import SQLiteDatabase, SQLiteUnitOfWork
 
 T = TypeVar("T")
@@ -43,8 +45,23 @@ class SQLiteExecutorCloseTimeout(SQLiteExecutorError):
     """The executor could not drain and stop before its close deadline."""
 
 
+@dataclass(slots=True)
+class _ReadTiming:
+    submitted: int
+    started: int = 0
+    finished: int = 0
+
+
 class _Job:
-    __slots__ = ("kind", "callback", "begin_mode", "loop", "future", "operation")
+    __slots__ = (
+        "kind",
+        "callback",
+        "begin_mode",
+        "loop",
+        "future",
+        "operation",
+        "timing",
+    )
 
     def __init__(
         self,
@@ -54,6 +71,7 @@ class _Job:
         loop: asyncio.AbstractEventLoop,
         future: asyncio.Future[Any],
         operation=None,
+        timing: _ReadTiming | None = None,
     ) -> None:
         self.kind = kind
         self.callback = callback
@@ -61,6 +79,7 @@ class _Job:
         self.loop = loop
         self.future = future
         self.operation = operation
+        self.timing = timing
 
 
 class SQLiteExecutor:
@@ -202,7 +221,9 @@ class SQLiteExecutor:
                 operation.finish()
             raise
 
-    async def run_read(self, callback: Callable[[SQLiteUnitOfWork], T]) -> T:
+    async def run_read(
+        self, callback: Callable[[SQLiteUnitOfWork], T], *, measure_cache: bool = False
+    ) -> T:
         """Execute one synchronous read callback and return only detached data."""
 
         if not callable(callback):
@@ -210,7 +231,21 @@ class SQLiteExecutor:
         operation = self._capture_effect()
         try:
             await self._ensure_initialized()
-            return await self._submit("read", callback, "DEFERRED", operation)
+            if not measure_cache:
+                return await self._submit("read", callback, "DEFERRED", operation)
+            timing = _ReadTiming(monotonic_ns())
+            try:
+                return await self._submit(
+                    "read", callback, "DEFERRED", operation, timing
+                )
+            finally:
+                # The worker never sees the caller's trace or module context.
+                # _submit drains accepted jobs even when the caller cancels.
+                if timing.finished:
+                    record_cache_sqlite_read(
+                        timing.started - timing.submitted,
+                        timing.finished - timing.started,
+                    )
         except BaseException:
             if operation is not None:
                 operation.finish()
@@ -222,11 +257,12 @@ class SQLiteExecutor:
         callback: Callable[[SQLiteUnitOfWork], Any] | None,
         begin_mode: str,
         operation=None,
+        timing=None,
     ) -> Any:
         loop, idle = self._bind_loop()
         await self._slots.acquire()
         future: asyncio.Future[Any] = loop.create_future()
-        job = _Job(kind, callback, begin_mode, loop, future, operation)
+        job = _Job(kind, callback, begin_mode, loop, future, operation, timing)
         try:
             with self._state_lock:
                 if self._state != "OPEN":
@@ -288,6 +324,8 @@ class SQLiteExecutor:
                         return
                 continue
             try:
+                if job.timing is not None:
+                    job.timing.started = monotonic_ns()
                 result = self._run_job(job)
             except BaseException as exc:
                 self._complete(job, error=exc)
@@ -338,6 +376,9 @@ class SQLiteExecutor:
     def _complete(
         self, job: _Job, *, result: Any = None, error: BaseException | None = None
     ) -> None:
+        if job.timing is not None:
+            job.timing.finished = monotonic_ns()
+
         def finish() -> None:
             with self._state_lock:
                 self._outstanding -= 1

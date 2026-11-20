@@ -2975,6 +2975,30 @@
               "s9": {
                 "type": "object",
                 "properties": {
+                  "slice_reads": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "slice_hits": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "slice_invalid": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "slice_decode_us": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "compact_read_mask": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "compact_hit_mask": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "legacy_read_mask": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "legacy_hit_mask": {
+                    "$ref": "#/$defs/s7"
+                  },
                   "refresh_wait_ms": {
                     "$ref": "#/$defs/s7"
                   },

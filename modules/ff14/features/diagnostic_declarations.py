@@ -139,7 +139,7 @@ OPTIONAL = {
 }
 HISTORY = obj({**{key: integer() for key in COUNTS}, **OPTIONAL}, OPTIONAL)
 REQUEST_OPS = "UniversalisWorlds UniversalisDataCenters OtherBusinessRead FF14WorldRegions FF14WorldServers FF14PublicCharacter FF14PublicCharacterZone FF14OutputMetadataShape FF14CharacterMetadata FF14OutputMetadata FF14CatalogCharacter".split()
-HISTORY_TIMING_FIELDS = "refresh_wait_ms planned eligible cache_hit attempted not_queried read_ms ranking_fetch_ms duty_order_ms fetch_ms write_ms total_ms".split()
+HISTORY_TIMING_FIELDS = "slice_reads slice_hits slice_invalid slice_decode_us compact_read_mask compact_hit_mask legacy_read_mask legacy_hit_mask refresh_wait_ms planned eligible cache_hit attempted not_queried read_ms ranking_fetch_ms duty_order_ms fetch_ms write_ms total_ms".split()
 REQUEST = obj(
     {
         "kind": text(values=["module_source_http_fetch"]),

@@ -847,6 +847,23 @@ class _BoundCache:
             return result
 
     @public_boundary("service")
+    async def lookup_many(
+        self, requests: tuple[CacheQuery, ...]
+    ) -> tuple[CacheLookup, ...]:
+        with measure_stage("cache_batch_read"):
+            with measure_stage("cache_authorize"):
+                await self.__check()
+            try:
+                results = await self.__cache.lookup_many(requests)
+            except Exception:
+                with measure_stage("cache_authorize"):
+                    await self.__check()
+                raise
+            with measure_stage("cache_authorize"):
+                await self.__check()
+            return results
+
+    @public_boundary("service")
     async def put(
         self,
         key: str,

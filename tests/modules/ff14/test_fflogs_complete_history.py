@@ -414,6 +414,42 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(FFLogsPayloadError):
             restore_complete_pack(raw, first, planned)
 
+    async def test_batch_reads_survive_missing_anchor_and_refetch_only_expired_members(
+        self,
+    ):
+        compact = self.large_catalog()
+        batches = []
+
+        async def lookup_many(queries):
+            batches.append(tuple(q.key for q in queries))
+            return await self.cache.lookup_many(queries)
+
+        self.scope.cache.lookup_many = lookup_many
+        original = await self.collect()
+        self.assertTrue(original.catalog_complete)
+        self.calls.clear()
+        batches.clear()
+        hot = await self.collect()
+        self.assertEqual(hot.groups, original.groups)
+        self.assertEqual(hot.history_cache_hits, 163)
+        self.assertFalse(self.calls)
+        self.assertEqual(batches, [tuple(key for key, _ in compact)])
+
+        anchor, missing = compact[0]
+        sibling, members = compact[1]
+        await self.cache.invalidate(anchor)
+        entry = await self.cache.get(sibling)
+        payload = _plain(entry.payload)
+        payload["entries"][0][1] = time() - HISTORY_CACHE_TTL - 1
+        await self.cache.put(sibling, payload, ttl_seconds=HISTORY_CACHE_TTL)
+        repaired = await self.collect()
+        expected = (*missing, members[0])
+        self.assertCountEqual(
+            self.requested(self.calls), [(k[0], k[2]) for k in expected]
+        )
+        self.assertEqual(repaired.history_cache_hits, 163 - len(expected))
+        self.assertEqual(repaired.groups, original.groups)
+
     async def test_compact_miss_and_bad_slice_use_legacy_or_only_fetch_missing_members(
         self,
     ):
@@ -896,6 +932,9 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
                 type(contract.runtime.repositories.cache), "get", backend_failure
             ),
             patch.object(
+                type(contract.runtime.repositories.cache), "get_many", backend_failure
+            ),
+            patch.object(
                 type(contract.runtime.repositories.cache), "put", backend_failure
             ),
         ):
@@ -911,7 +950,7 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
             raise OSError("synthetic backend failure after revocation")
 
         with patch.object(
-            type(contract.runtime.repositories.cache), "get", revoked_lookup
+            type(contract.runtime.repositories.cache), "get_many", revoked_lookup
         ):
             with self.assertRaises(InvalidInvocation):
                 await self.collect()
@@ -962,6 +1001,7 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(type(contract.runtime.repositories.cache), "get", fail),
+            patch.object(type(contract.runtime.repositories.cache), "get_many", fail),
             patch.object(type(contract.runtime.repositories.cache), "put", fail),
         ):
             result = await handler.invoke(

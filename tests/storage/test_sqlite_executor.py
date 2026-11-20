@@ -20,6 +20,7 @@ from ygl_test_subject.infrastructure.sqlite.database import (
 from ygl_test_subject.infrastructure.sqlite.executor import (
     SQLiteExecutorCloseTimeout,
 )
+from ygl_test_subject.infrastructure.sync_diagnostics import SyncDiagnostics, emit
 
 
 class SQLiteExecutorTests(unittest.IsolatedAsyncioTestCase):
@@ -33,6 +34,30 @@ class SQLiteExecutorTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         if self.executor.state != "CLOSED":
             await self.executor.close()
+
+    async def test_cache_read_reports_queue_and_worker_time_to_its_caller(self):
+        store = SyncDiagnostics()
+        token = store.activate("a" * 32, "command")
+        try:
+            emit("core_start")
+            await self.executor.initialize()
+            with patch(
+                "ygl_test_subject.infrastructure.sqlite.executor.monotonic_ns",
+                side_effect=(0, 300_000, 1_000_000),
+            ):
+                value = await self.executor.run_read(
+                    lambda unit: unit.execute("SELECT 23").fetchone()[0],
+                    measure_cache=True,
+                )
+                await self.executor.run_read(lambda unit: None)
+            self.assertEqual(value, 23)
+            self.assertEqual(
+                store.snapshot()["attempts"][0]["cache_sqlite"],
+                {"jobs": 1, "queue_us": 300, "worker_us": 700},
+            )
+        finally:
+            store.reset(token)
+            store.close()
 
     async def test_executor_initializes_once_and_keeps_connections_on_worker(
         self,

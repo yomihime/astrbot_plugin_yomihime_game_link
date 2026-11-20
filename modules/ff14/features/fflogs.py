@@ -517,6 +517,61 @@ class FFLogsCharacterLookup:
                 ):
                     raise FFLogsPayloadError("history pack selection")
 
+        summary.update(
+            slice_reads=0,
+            slice_hits=0,
+            slice_invalid=0,
+            slice_decode_us=0,
+            compact_hit_mask=0,
+            compact_read_mask=0,
+            legacy_hit_mask=0,
+            legacy_read_mask=0,
+        )
+
+        def restore_lookup(index, group, compact_format, cache_key, lookup):
+            summary["slice_reads"] += 1
+            prefix = "compact" if compact_format else "legacy"
+            if index < 30:
+                summary[f"{prefix}_read_mask"] |= 1 << index
+            snapshots, selections, times = {}, {}, {}
+            hit = (
+                lookup.status is CacheLookupStatus.HIT
+                and lookup.entry.expires_at.timestamp() > time()
+            )
+            if hit:
+                if compact_format:
+                    selections, times = restore_complete_pack(
+                        lookup.entry.payload, cache_key, group
+                    )
+                else:
+                    snapshots, selections, times = restore_pack(
+                        lookup.entry.payload, identity, group
+                    )
+                validate_selections(selections)
+                summary["slice_hits"] += 1
+            if compact_format:
+                compact_read.add(group)
+            else:
+                loaded[index] = snapshots
+            for key, selection in selections.items():
+                if key not in dates or times[key] > dates[key]:
+                    cached[key], dates[key] = selection, times[key]
+            if selections and index < 30:
+                summary[f"{prefix}_hit_mask"] |= 1 << index
+            return hit
+
+        def accept(index, group, compact_format, cache_key, lookup):
+            decode_started = monotonic()
+            try:
+                return restore_lookup(index, group, compact_format, cache_key, lookup)
+            except (PermissionError, ServiceUnavailable, OperationTimeout):
+                raise
+            except Exception:
+                summary["slice_invalid"] += 1
+                return False
+            finally:
+                summary["slice_decode_us"] += int((monotonic() - decode_started) * 1e6)
+
         async def read_packs(pending_reads, compact_format):
             restored = False
             for index, group in pending_reads:
@@ -534,28 +589,7 @@ class FFLogsCharacterLookup:
                         raise AccessDenied()
                     if monotonic() >= read_stop:
                         break
-                    snapshots, selections, times = {}, {}, {}
-                    if (
-                        lookup.status is CacheLookupStatus.HIT
-                        and lookup.entry.expires_at.timestamp() > time()
-                    ):
-                        if compact_format:
-                            selections, times = restore_complete_pack(
-                                lookup.entry.payload, cache_key, group
-                            )
-                        else:
-                            snapshots, selections, times = restore_pack(
-                                lookup.entry.payload, identity, group
-                            )
-                        validate_selections(selections)
-                        restored = True
-                    if compact_format:
-                        compact_read.add(group)
-                    else:
-                        loaded[index] = snapshots
-                    for key, selection in selections.items():
-                        if key not in dates or times[key] > dates[key]:
-                            cached[key], dates[key] = selection, times[key]
+                    restored |= accept(index, group, compact_format, cache_key, lookup)
                 except CacheUnavailable:
                     continue
                 except (PermissionError, ServiceUnavailable, OperationTimeout):
@@ -568,7 +602,40 @@ class FFLogsCharacterLookup:
                 active()
             return restored
 
+        lookup_many = getattr(cache, "lookup_many", None)
+
         async def read_groups(groups, compact_format):
+            if callable(lookup_many):
+                key_for = complete_pack_key if compact_format else cache_pack_key
+                for offset in range(0, len(groups), 12):
+                    chunk = groups[offset : offset + 12]
+                    active()
+                    if monotonic() >= read_stop:
+                        break
+                    queries = tuple(
+                        CacheQuery(key_for(identity, group)) for _, group in chunk
+                    )
+                    try:
+                        async with asyncio.timeout(max(0, read_stop - monotonic())):
+                            results = await lookup_many(queries)
+                    except CacheUnavailable:
+                        # Isolate an unreadable physical row while the budget allows.
+                        await read_packs(iter(chunk), compact_format)
+                        continue
+                    except (PermissionError, ServiceUnavailable, OperationTimeout):
+                        raise
+                    except TimeoutError:
+                        break
+                    active()
+                    if any(row.status is CacheLookupStatus.REJECTED for row in results):
+                        raise AccessDenied()
+                    for (index, group), query, lookup in zip(
+                        chunk, queries, results, strict=True
+                    ):
+                        if monotonic() >= read_stop:
+                            break
+                        accept(index, group, compact_format, query.key, lookup)
+                return
             pending_reads = iter(groups)
             readers = [
                 asyncio.create_task(read_packs(pending_reads, compact_format))
@@ -585,7 +652,10 @@ class FFLogsCharacterLookup:
         compact_hit = False
         compact_covered = set()
         if cache is not None:
-            if compact:
+            if compact and callable(lookup_many):
+                await read_groups(tuple(enumerate(compact)), True)
+                compact_covered.update(cached)
+            elif compact:
                 # The first slice is published last. One miss reaches legacy packs.
                 compact_hit = await read_packs(iter(((0, compact[0]),)), True)
                 if compact_hit:
