@@ -6,7 +6,7 @@ import asyncio
 import json
 import math
 import re
-from collections import deque
+from collections import OrderedDict, deque
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 from decimal import Decimal
@@ -49,6 +49,7 @@ from ....yomihime_game_link_sdk.storage import (
     SecretMetadataState,
 )
 from .fflogs_cards import (
+    CATALOG_KILL_LIMITATION,
     CATALOG_LIMITATION,
     DETAIL_LIMITATION,
     HISTORY_INCOMPLETE,
@@ -101,6 +102,8 @@ CATALOG_BATCH_SIZE = 24
 SMALL_CATALOG_BATCH_SIZE = 12
 HISTORY_CACHE_READERS = 3
 MAX_CHARACTER_ROWS = 40
+PUBLIC_KILL_BATCH_SIZE = 32
+PUBLIC_KILL_CACHE_ENTRIES = 64
 CATALOG_DIAGNOSTIC_BYTES = 16_384
 _NUMBER = re.compile(r"(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?\Z", re.ASCII)
 
@@ -153,6 +156,7 @@ class FFLogsCharacterLookup:
         self._metadata_cache: dict[str, tuple[float, OutputMetadata | None, str]] = {}
         self._ranking_contract_cache = {}
         self._server_cache = {}
+        self._public_kill_cache = OrderedDict()
         # Only active callers retain locks. No invocation port or task is shared.
         self._refresh_locks = WeakValueDictionary()
         from .duty_order import DutyOrderCatalog
@@ -166,6 +170,7 @@ class FFLogsCharacterLookup:
         self._lifecycle = object()
         self._metadata_cache.clear()
         self._server_cache.clear()
+        self._public_kill_cache.clear()
         self._refresh_locks.clear()
         self._ranking_contract_cache.clear()
         self._duty_order.close()
@@ -353,6 +358,7 @@ class FFLogsCharacterLookup:
         metrics=None,
         budget=None,
         failures=None,
+        public_kill_details=False,
     ):
         from .fflogs_history_cache import history_identity
 
@@ -400,6 +406,7 @@ class FFLogsCharacterLookup:
                 metrics,
                 budget,
                 failures,
+                public_kill_details,
             )
 
     async def _ranking_plan(
@@ -418,6 +425,7 @@ class FFLogsCharacterLookup:
         metrics,
         budget,
         failures,
+        public_kill_details,
     ):
         from .fflogs_history_cache import (
             HISTORY_CACHE_TTL,
@@ -859,6 +867,23 @@ class FFLogsCharacterLookup:
             total_ms=max(0, int((monotonic() - started) * 1000)),
         )
         result = _assemble_catalog_rankings(character, metadata, targets, outcomes)
+        if public_kill_details:
+            result = await self._enrich_public_kill_counts(
+                scope,
+                source_id,
+                result,
+                targets,
+                outcomes,
+                identity,
+                identity_variables,
+                lifecycle,
+                stop_at,
+                reusable=cache is not None,
+                metrics=metrics,
+            )
+            active()
+            if result.hidden:
+                return result
         if duty_order is not None:
             from .duty_order import apply_duty_order
 
@@ -901,6 +926,104 @@ class FFLogsCharacterLookup:
             history_cache_hits=len(cached),
             history_fetched_at=min(used_dates.values()) if used_dates else None,
             history_cache_ttl=HISTORY_CACHE_TTL if used_dates else None,
+        )
+
+    async def _enrich_public_kill_counts(
+        self,
+        scope,
+        source_id,
+        character,
+        targets,
+        outcomes,
+        identity,
+        variables,
+        lifecycle,
+        deadline,
+        *,
+        reusable,
+        metrics=None,
+    ):
+        from .fflogs_history_cache import HISTORY_CACHE_TTL
+        from .fflogs_kill_counts import KillCountCharacterHidden, fetch_kill_counts
+
+        batch, row_keys, exact_eligible = _public_kill_batch(
+            character, targets, outcomes
+        )
+        if not batch or monotonic() >= deadline:
+            return character
+
+        cache_key = (identity, character.metric, batch)
+        previous = self._public_kill_cache.get(cache_key) if reusable else None
+        hit = previous is not None and previous[0] > monotonic()
+        if metrics is not None:
+            metrics.cache("FF14PublicKillCounts", hit)
+        try:
+            async with asyncio.timeout_at(deadline):
+                if hit:
+                    check_source = getattr(scope, "check_source", None)
+                    if check_source is not None:
+                        await check_source(source_id)
+                    counts = previous[1]
+                else:
+                    counts = await fetch_kill_counts(
+                        scope,
+                        source_id,
+                        character_id=character.character_id,
+                        name=character.name,
+                        server_name=character.server_name,
+                        server_slug=variables["serverSlug"],
+                        server_region=variables["serverRegion"],
+                        targets=batch,
+                    )
+        except KillCountCharacterHidden:
+            return replace(character, hidden=True, rankings=(), groups=())
+        except OperationTimeout:
+            raise
+        except TimeoutError:
+            return character
+        if self._lifecycle is not lifecycle:
+            raise ServiceUnavailable()
+        if reusable:
+            if not hit:
+                ttl = HISTORY_CACHE_TTL if counts else METADATA_FAILURE_CACHE_SECONDS
+                self._public_kill_cache[cache_key] = (monotonic() + ttl, counts)
+            # A different identity may have evicted this snapshot while the
+            # current invocation was awaiting authorization.
+            if cache_key in self._public_kill_cache:
+                self._public_kill_cache.move_to_end(cache_key)
+            while len(self._public_kill_cache) > PUBLIC_KILL_CACHE_ENTRIES:
+                self._public_kill_cache.popitem(last=False)
+        if not counts:
+            return character
+        groups = []
+        for group in character.groups:
+            rows = []
+            for row in group.rankings:
+                key = row_keys.get(
+                    (
+                        group.category,
+                        group.zone_id,
+                        group.difficulty_id,
+                        row.encounter_id,
+                    )
+                )
+                observed = counts.get(key)
+                bound = row.public_kills_lower_bound or 0
+                if observed is not None:
+                    if (
+                        key in exact_eligible
+                        and observed.complete
+                        and observed.count >= bound
+                    ):
+                        row = replace(row, public_kills_exact=observed.count)
+                    elif observed.count > bound:
+                        row = replace(row, public_kills_lower_bound=observed.count)
+                rows.append(row)
+            groups.append(replace(group, rankings=tuple(rows)))
+        return replace(
+            character,
+            groups=tuple(groups),
+            rankings=tuple(row for group in groups for row in group.rankings),
         )
 
     async def _fetch_catalog_rankings(
@@ -1789,6 +1912,7 @@ class FFLogsCharacterLookup:
                         metrics=metrics,
                         budget=budget,
                         failures=failures,
+                        public_kill_details=True,
                     )
             except AccessDenied:
                 raise
@@ -1974,7 +2098,7 @@ def _selection_membership_matches(metadata, zone_id, selection):
 
 
 def _assemble_catalog_rankings(character, metadata, targets, outcomes):
-    """Select entire rows using raw percentiles; never combine source periods."""
+    """Select entire rows and estimate a separate lower bound for public kills."""
     warnings = []
     groups = []
     savage = {}
@@ -2129,6 +2253,9 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
             row,
             encounter_name=ultimate_group_name(zone.name, row.encounter_name),
             history_complete=complete,
+            public_kills_lower_bound=_public_kills_lower_bound(
+                entries, zone, difficulty, row
+            ),
         )
         ultimate_groups.append(
             CharacterRankingGroup(
@@ -2142,7 +2269,7 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
             )
         )
     # Same encounter IDs within the same explicit zone/difficulty only. Names
-    # never merge unrelated targets; every displayed field stays on one row.
+    # never merge unrelated targets; the winning performance fields stay intact.
     grouped = {}
     for entries in savage.values():
         records = [entry for entry in entries if entry[2].query_state == "record"]
@@ -2164,7 +2291,15 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
         )
         grouped.setdefault(
             (zone.zone_id, difficulty.difficulty_id), (zone, difficulty, [])
-        )[2].append(replace(row, history_complete=complete))
+        )[2].append(
+            replace(
+                row,
+                history_complete=complete,
+                public_kills_lower_bound=_public_kills_lower_bound(
+                    entries, zone, difficulty, row
+                ),
+            )
+        )
     for zone, difficulty, rows in grouped.values():
         groups.append(
             CharacterRankingGroup(
@@ -2209,6 +2344,114 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
         catalog_complete=not warnings and bool(all_groups),
         catalog_evaluated=True,
     )
+
+
+def _public_kill_batch(character, targets, outcomes):
+    """Select whole displayed duty groups, preferring evidence of overlap."""
+    aliases, positives, identities = {}, {}, {}
+    exact_eligible = set()
+    for target in targets:
+        zone, difficulty, category, partition = target
+        if partition is None:
+            continue
+        selection = outcomes.get(_target_key(target, character.metric))
+        if selection is not None and not isinstance(selection, str):
+            if selection.size != 8:
+                continue
+            source_rows = {row.encounter_id: row for row in selection.rows}
+        elif difficulty.sizes == (8,):
+            source_rows = {}
+        else:
+            continue
+        for encounter in zone.encounters:
+            identity = (
+                category,
+                zone.zone_id,
+                difficulty.difficulty_id,
+                encounter.encounter_id,
+            )
+            duty = (
+                (
+                    category,
+                    difficulty.difficulty_id,
+                    difficulty.name,
+                    *ultimate_group_key(zone.name, encounter.name),
+                )
+                if category == "ultimate"
+                else identity
+            )
+            alias = identity[1:]
+            identities[identity] = duty
+            aliases.setdefault(duty, set()).add(alias)
+            if category == "savage" and difficulty.sizes == (8,):
+                exact_eligible.add(duty)
+            record = source_rows.get(encounter.encounter_id)
+            if (
+                record is not None
+                and record.total_kills
+                and normalized_encounter_name(record.encounter_name)
+                == normalized_encounter_name(encounter.name)
+            ):
+                positives.setdefault(duty, set()).add((*alias, partition))
+
+    row_keys, candidates = {}, {}
+    for group in character.groups:
+        for row in group.rankings:
+            if row.query_state not in {"record", "no_records"}:
+                continue
+            identity = (
+                group.category,
+                group.zone_id,
+                group.difficulty_id,
+                row.encounter_id,
+            )
+            duty = identities.get(identity)
+            if duty is None:
+                continue
+            scoped_aliases = aliases[duty]
+            positive_scopes = positives.get(duty, set())
+            if len({alias[0] for alias in scoped_aliases}) != len(scoped_aliases):
+                # The same zone lists multiple same-named encounters. Update
+                # only from the exact encounter selected for this display row.
+                duty = identity
+                scoped_aliases = {identity[1:]}
+                positive_scopes = {
+                    scope for scope in positive_scopes if scope[:3] == identity[1:]
+                }
+            row_keys[identity] = duty
+            candidates[duty] = (scoped_aliases, positive_scopes)
+
+    batch = []
+    for duty, (scopes, _) in sorted(
+        candidates.items(),
+        key=lambda item: (-len({scope[:3] for scope in item[1][1]}), -len(item[1][1])),
+    ):
+        if len(batch) + len(scopes) > PUBLIC_KILL_BATCH_SIZE:
+            continue
+        batch.extend((*scope, duty) for scope in sorted(scopes))
+    return tuple(batch), row_keys, exact_eligible
+
+
+def _public_kills_lower_bound(entries, zone, difficulty, chosen):
+    # Source counts can overlap between periods and across Ultimate reissues.
+    # Without fight identities the largest verified scope is safe to report.
+    name = normalized_encounter_name(difficulty.name)
+    compatible = [
+        (origin.zone_id, row)
+        for origin, scope, row in entries
+        if scope.difficulty_id == difficulty.difficulty_id
+        and normalized_encounter_name(scope.name) == name
+    ]
+    if len({(zone_id, row.encounter_id) for zone_id, row in compatible}) > len(
+        {zone_id for zone_id, _ in compatible}
+    ):
+        compatible = [
+            (zone_id, row)
+            for zone_id, row in compatible
+            if (zone_id, row.encounter_id) == (zone.zone_id, chosen.encounter_id)
+        ]
+    bound = max((row.total_kills or 0 for _, row in compatible), default=0)
+    return bound or None
 
 
 def _savage_composition(zone, partition):
@@ -2625,6 +2868,7 @@ def _character_result(
             else "查询条件：已应用指定的副本、难度和分区。"
         ),
     ]
+    catalog_layout = bool(character.groups or character.catalog_evaluated)
     if character.groups:
         blocks.append(
             TextBlock(
@@ -2653,7 +2897,7 @@ def _character_result(
         if ranking.query_state == "not_queried":
             parts.append("未查询")
         elif ranking.query_state == "no_records":
-            parts.append("该范围查询成功，无公开记录")
+            parts.append("已查成绩分区无公开排名")
         elif ranking.source_error:
             parts.append("数据暂不可用（ERR）")
         if ranking.origin is not None:
@@ -2667,8 +2911,17 @@ def _character_result(
                 else ranking.rank_percent
             )
             parts.append(f"排名百分位 {percentile_text(value)}")
-        if ranking.total_kills is not None:
-            parts.append(f"本次统计过本次数 {ranking.total_kills}")
+        if ranking.public_kills_exact is not None:
+            parts.append(f"公开过本 {ranking.public_kills_exact} 次")
+        elif catalog_layout:
+            bound = ranking.public_kills_lower_bound
+            parts.append(
+                "公开过本次数未知" if bound is None else f"公开过本至少 {bound} 次"
+            )
+        elif ranking.total_kills:
+            parts.append(f"当前筛选范围公开过本至少 {ranking.total_kills} 次")
+        else:
+            parts.append("公开过本次数未知")
         row_lines.append(" · ".join(parts))
     # Preserve the existing 40-row command bound without violating the generic
     # 32-block document budget. Every displayed row remains in text fallback.
@@ -2696,7 +2949,13 @@ def _character_result(
                 else CATALOG_LIMITATION
             )
         )
-    blocks.append(TextBlock(DETAIL_LIMITATION))
+    blocks.append(
+        TextBlock(
+            f"{CATALOG_KILL_LIMITATION}最高数值与最佳百分位可能来自不同记录。"
+            if catalog_layout
+            else DETAIL_LIMITATION
+        )
+    )
     if len(character.rankings) > len(visible):
         warnings.append(f"战绩较多，结果仅显示前 {limit} 项。")
     url = (

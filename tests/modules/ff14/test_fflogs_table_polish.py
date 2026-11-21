@@ -101,6 +101,10 @@ class LogsTablePolishTests(unittest.TestCase):
         savage_table = next(b for b in savage.blocks if isinstance(b, cards.Table))
         self.assertEqual(savage_table.columns, table.columns)
         self.assertEqual(savage_table.rows[0][2], "6.x")
+        self.assertEqual(
+            document.blocks[2:],
+            (cards.Text("版本对应最佳 rDPS 百分位。", style="caption"),),
+        )
         self.assertNotIn("资料片：", str(document))
 
     def test_catalog_anchor_survives_reissues_unknown_names_and_id_shuffling(self):
@@ -278,7 +282,7 @@ class LogsTablePolishTests(unittest.TestCase):
         table, *notes = document.blocks[0].blocks
         self.assertTrue(all("\n" not in row[0] for row in table.rows))
         self.assertEqual(notes, [])
-        self.assertIn("部分记录未取得", document.blocks[-1].content)
+        self.assertIn("部分记录未取得", document.subtitle)
         self.assertTrue(
             all(
                 row.query_state == state

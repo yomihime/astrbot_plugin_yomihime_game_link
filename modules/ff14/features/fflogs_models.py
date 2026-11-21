@@ -128,6 +128,9 @@ class CharacterRanking:
     query_state: str = "record"
     origin: RankingOrigin | None = None
     history_complete: bool = True
+    # Directory-only inference. total_kills remains the winning source value.
+    public_kills_lower_bound: int | None = None
+    public_kills_exact: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

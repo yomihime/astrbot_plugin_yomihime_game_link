@@ -7,14 +7,19 @@ import json
 import unittest
 from dataclasses import replace
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from ygl_test_subject.core.contracts.diagnostics import diagnostic_payload
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.modules.ff14.features.diagnostic_declarations import DECLARATIONS
 from ygl_test_subject.modules.ff14.features.fflogs import (
     FFLogsCharacterLookup,
     _assemble_catalog_rankings,
     _bounded_catalog_targets,
     _catalog_query_targets,
+    _character_result,
     _target_key,
 )
 from ygl_test_subject.modules.ff14.features.fflogs_cards import (
@@ -38,6 +43,7 @@ from ygl_test_subject.modules.ff14.features.fflogs_models import (
 
 from tests.modules.ff14 import test_fflogs as fixture
 from tests.modules.ff14 import test_fflogs_cards as catalog_fixture
+from yomihime_game_link_sdk import DiagnosticDeclaration
 
 
 def zone(
@@ -298,6 +304,99 @@ class CatalogPolicyTests(unittest.TestCase):
         self.assertTrue(
             result.catalog_complete
         )  # missing period name is not a missed query
+
+    def test_public_kill_bounds_use_distinct_duty_and_difficulty_without_summing(self):
+        source = catalog()
+        tier = replace(
+            source.zones[0],
+            partitions=(
+                *source.zones[0].partitions,
+                PartitionRecord(4, "非标准阵容构成 (Patch 7.4)", False),
+                PartitionRecord(5, "标准阵容构成 (Patch 7.5)", False),
+                PartitionRecord(6, "超越之力 (Patch 7.5)", False),
+            ),
+        )
+        old_ultimate = replace(
+            source.zones[4],
+            difficulties=(
+                *source.zones[4].difficulties,
+                DifficultyRecord(2, "Synthetic alternate", (8,)),
+            ),
+        )
+        source = replace(
+            source, zones=(tier, *source.zones[1:4], old_ultimate, *source.zones[5:])
+        )
+        candidates = targets(source)
+        attrs = {
+            (73, 3, 3): dict(raw="99", kills=4, job="Scholar"),
+            (73, 3, 4): dict(raw="30", kills=12, job="Warrior"),
+            (73, 3, 5): dict(raw="20", kills=12, job="Scholar"),
+            (101, 1, 3): dict(raw="60", kills=22, job="Astrologian"),
+            (102, 1, 3): dict(raw="100", kills=3, job="Warrior"),
+            (101, 2, 3): dict(raw="10", kills=56, job="Monk"),
+            (103, 1, 3): dict(kills=0),
+        }
+        outcomes = {
+            key(target): selection(target, **attrs[key(target)[:3]])
+            for target in candidates
+        }
+        result = _assemble_catalog_rankings(record(), source, candidates, outcomes)
+        self.assertNotIn((73, 3, 6), [key(target)[:3] for target in candidates])
+        by_zone = {group.zone_id: group.rankings[0] for group in result.groups}
+        for zone_id, wanted in (
+            (73, (4, 12, "Scholar", Decimal("99"))),
+            (102, (3, 22, "Warrior", Decimal("100"))),
+            (103, (0, None, "Scholar", Decimal("99.9762"))),
+        ):
+            row = by_zone[zone_id]
+            self.assertEqual(
+                (
+                    row.total_kills,
+                    row.public_kills_lower_bound,
+                    row.spec,
+                    row.rank_percent_exact,
+                ),
+                wanted,
+            )
+        output = _character_result(
+            result, "https://cn.fflogs.com", "CN", "rdps", None, "cn"
+        )
+        ultimate, savage = output.document.card.blocks[:2]
+        self.assertEqual(
+            {row[4].spans[0].text for row in ultimate.blocks[0].rows}, {"22", "—"}
+        )
+        self.assertEqual(savage.blocks[1].rows[0][4].spans[0].text, "12")
+        text = str(output.document.ordered_blocks)
+        self.assertIn("公开过本至少 12 次", text)
+        self.assertIn("公开过本次数未知", text)
+
+    def test_partial_public_kill_bound_and_empty_ranges(self):
+        source = catalog()
+        candidates = targets(source)
+        outcomes = {key(target): selection(target, rows=False) for target in candidates}
+        for target in candidates:
+            if target[0].zone_id == 101:
+                outcomes[key(target)] = "failed"
+            elif target[0].zone_id == 102:
+                outcomes[key(target)] = selection(target, kills=14)
+        result = _assemble_catalog_rankings(record(), source, candidates, outcomes)
+        by_zone = {group.zone_id: group.rankings[0] for group in result.groups}
+        self.assertEqual(by_zone[102].public_kills_lower_bound, 14)
+        self.assertFalse(by_zone[102].history_complete)
+        card = character_card(
+            result,
+            realm="cn",
+            host="https://cn.fflogs.com",
+            limit=40,
+            explicit_selection=False,
+        )
+        self.assertIn(
+            "14", [row[4].spans[0].text for row in card.blocks[0].blocks[0].rows]
+        )
+        self.assertIn("部分记录未取得", card.subtitle)
+        self.assertEqual(card.blocks[-1].content, "版本对应最佳 rDPS 百分位。")
+        self.assertEqual(by_zone[73].query_state, "no_records")
+        self.assertIsNone(by_zone[73].public_kills_lower_bound)
 
     def test_budget_counts_partition_targets_and_covers_distinct_groups(self):
         source = catalog()
@@ -765,6 +864,30 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
             for item in diagnostics.events
             if item["event_id"] == "FF14RequestSummary"
         )
+        manifest_path = (
+            Path(__file__).parents[3] / "modules/ff14/yomihime.manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_bytes())
+        emitted = next(
+            item
+            for item in manifest["modules"][0]["diagnostics"]
+            if item["event_id"] == summary_event["event_id"]
+        )
+        installed_declaration = validate_contract(DiagnosticDeclaration(**emitted))
+        self.assertEqual(
+            installed_declaration,
+            validate_contract(
+                next(
+                    item
+                    for item in DECLARATIONS
+                    if item.event_id == summary_event["event_id"]
+                )
+            ),
+        )
+        validated, _ = diagnostic_payload(
+            installed_declaration.payload_schema, summary_event["payload"]
+        )
+        self.assertEqual(validated, summary_event["payload"])
         summary = summary_event["payload"]["payload"]
         self.assertEqual(summary["history"]["refresh_wait_ms"], 0)
         self.assertGreater(summary["history"]["planned"], 0)
@@ -779,9 +902,18 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(summary_event["payload"]["cached"])
         self.assertEqual(
             sum(item["attempts"] for item in summary["operations"]),
-            len(http.requests) + len(http.duty_requests),
+            len(http.requests) + len(http.duty_requests) + len(http.kill_requests),
         )
         self.assertEqual((len(http.requests), len(http.duty_requests)), (8, 1))
+        self.assertEqual(len(http.kill_requests), 1)
+        kill_operation = next(
+            row
+            for row in summary["operations"]
+            if row["operation"] == "FF14PublicKillCounts"
+        )
+        self.assertEqual(
+            (kill_operation["attempts"], kill_operation["cache"]), (1, "module_miss")
+        )
         self.assertEqual(summary["network_attempts"], "unknown")
         self.assertEqual(summary["host_oauth"], "unobserved")
         self.assertEqual(

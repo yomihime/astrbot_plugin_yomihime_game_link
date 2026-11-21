@@ -3060,6 +3060,7 @@
                   "FF14WorldServers",
                   "FF14PublicCharacter",
                   "FF14PublicCharacterZone",
+                  "FF14PublicKillCounts",
                   "FF14OutputMetadataShape",
                   "FF14CharacterMetadata",
                   "FF14OutputMetadata",
@@ -3116,7 +3117,7 @@
                 "items": {
                   "$ref": "#/$defs/s12"
                 },
-                "maxItems": 11
+                "maxItems": 12
               },
               "s15": {
                 "type": "string",
