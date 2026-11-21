@@ -46,6 +46,7 @@ REQUEST_OPERATIONS = frozenset(
         "FF14WorldServers",
         "FF14PublicCharacter",
         "FF14PublicCharacterZone",
+        "FF14PublicKillCounts",
         "FF14OutputMetadataShape",
         "FF14CharacterMetadata",
         "FF14OutputMetadata",

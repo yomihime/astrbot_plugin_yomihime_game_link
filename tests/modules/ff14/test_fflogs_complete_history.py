@@ -418,6 +418,7 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         compact = self.large_catalog()
+        self.raw_by_zone[900] = "50.0001"
         batches = []
 
         async def lookup_many(queries):
@@ -427,6 +428,10 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.scope.cache.lookup_many = lookup_many
         original = await self.collect()
         self.assertTrue(original.catalog_complete)
+        row = next(
+            group.rankings[0] for group in original.groups if group.zone_id == 900
+        )
+        self.assertEqual(row.public_kills_lower_bound, 7)
         self.calls.clear()
         batches.clear()
         hot = await self.collect()
@@ -569,7 +574,7 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
         )
         return events, evidence
 
-    async def collect(self, evidence=None, deadline=None):
+    async def collect(self, evidence=None, deadline=None, *, public_kill_details=False):
         return await self.handler._catalog_rankings(
             self.scope,
             self.source,
@@ -580,6 +585,89 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
             evidence,
             deadline=deadline,
             cache_owner=self.owner,
+            public_kill_details=public_kill_details,
+        )
+
+    async def test_public_kill_detail_batch_reuses_same_owner_warm_without_http(self):
+        from ygl_test_subject.modules.ff14.features.fflogs_kill_counts import KillCount
+
+        self.shared_history()
+        detail_calls = []
+
+        async def fetch_detail(scope, source_id, *, targets, **kwargs):
+            detail_calls.append((source_id, targets))
+            duty = targets[0][3]
+            self.assertEqual(
+                len({alias[0] for alias in targets if alias[3] == duty}), 10
+            )
+            self.assertEqual(kwargs["character_id"], self.role.character_id)
+            return {duty: KillCount(13, False)}
+
+        with patch(
+            "ygl_test_subject.modules.ff14.features.fflogs_kill_counts.fetch_kill_counts",
+            new=fetch_detail,
+        ):
+            cold = await self.collect(public_kill_details=True)
+            self.calls.clear()
+            warm = await self.collect(public_kill_details=True)
+
+            async def authorize_and_evict(source_id):
+                if source_id == self.source:
+                    await asyncio.sleep(0)
+                    self.handler._public_kill_cache.popitem(last=False)
+
+            self.scope.check_source = authorize_and_evict
+            concurrent_eviction = await self.collect(public_kill_details=True)
+        self.assertEqual(len(detail_calls), 1)
+        self.assertEqual(warm.history_cache_hits, 111)
+        self.assertFalse(self.calls)
+        self.assertEqual(cold.groups, warm.groups)
+        self.assertEqual(warm.groups, concurrent_eviction.groups)
+        row = warm.groups[0].rankings[0]
+        self.assertEqual((row.total_kills, row.public_kills_lower_bound), (9, 13))
+
+    async def test_supplemental_visibility_change_discards_all_previous_rankings(self):
+        from ygl_test_subject.modules.ff14.features.fflogs_kill_counts import (
+            KillCountCharacterHidden,
+        )
+
+        with patch(
+            "ygl_test_subject.modules.ff14.features.fflogs_kill_counts.fetch_kill_counts",
+            side_effect=KillCountCharacterHidden,
+        ):
+            result = await self.collect(public_kill_details=True)
+        self.assertTrue(result.hidden)
+        self.assertEqual((result.groups, result.rankings), ((), ()))
+
+    async def test_confirmed_zero_and_unknown_counts_render_differently(self):
+        from ygl_test_subject.modules.ff14.features.fflogs_kill_counts import KillCount
+
+        self.raw_by_zone[75] = "50.0001"
+
+        async def fetch_detail(scope, source_id, *, targets, **kwargs):
+            return {
+                duty: KillCount(0 if zone == 73 else 2, True)
+                for zone, _, _, duty in targets
+                if zone in {73, 75}
+            }
+
+        with patch(
+            "ygl_test_subject.modules.ff14.features.fflogs_kill_counts.fetch_kill_counts",
+            new=fetch_detail,
+        ):
+            result = await self.collect(public_kill_details=True)
+        by_zone = {group.zone_id: group.rankings[0] for group in result.groups}
+        self.assertEqual(by_zone[73].public_kills_exact, 0)
+        self.assertIsNone(by_zone[74].public_kills_exact)
+        self.assertIsNone(by_zone[74].public_kills_lower_bound)
+        self.assertIsNone(by_zone[75].public_kills_exact)
+        self.assertEqual(by_zone[75].public_kills_lower_bound, 7)
+        output = _character_result(
+            result, "https://cn.fflogs.com", "CN", "rdps", None, "cn"
+        )
+        tables = output.document.card.blocks[1].blocks[1::2]
+        self.assertEqual(
+            [table.rows[0][4].spans[0].text for table in tables], ["0", "—", "7"]
         )
 
     def shared_history(self):
@@ -667,6 +755,7 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(image.n_frames, 1)
             self.assertEqual(image.format, "PNG")
         self.assertIn("100.0%", presentation.text)
+        self.assertIn("公开过本至少 9 次", presentation.text)
         self.assertNotIn("未查询", presentation.text)
         summary = project(*events[-1])
         self.assertEqual(

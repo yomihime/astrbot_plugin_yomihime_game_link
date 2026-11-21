@@ -115,9 +115,10 @@ class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
                     ["绝境战", "零式"],
                 )
                 self.assertIn(
-                    "cn.fflogs.com" if realm == "国服" else "www.fflogs.com",
-                    card.blocks[-1].content,
+                    "FFLogs · CN" if realm == "国服" else "FFLogs · Global",
+                    card.subtitle,
                 )
+                self.assertEqual(card.blocks[-1].content, "版本对应最佳 rDPS 百分位。")
                 self.assertEqual(card.sources, ())
         self.assertEqual(len(self.context.calls), 1)
         self.assertEqual(

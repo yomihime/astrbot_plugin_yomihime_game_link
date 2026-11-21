@@ -126,7 +126,12 @@ class PartitionSelectionTests(unittest.TestCase):
                 limit=40,
                 explicit_selection=False,
             )
-            self.assertIn("* 非标准阵容", str(document))
+            self.assertIn("* 非标准阵容", document.subtitle)
+            cells = document.blocks[1].blocks[1].rows[0]
+            self.assertEqual(cells[2], "*7.5")
+            self.assertEqual(cells[3].spans[0].text, "333")
+            self.assertEqual(cells[-1].spans[0].text, "99.0%")
+            self.assertEqual(document.blocks[-1].content, "版本对应最佳 rDPS 百分位。")
             self.assertEqual(document.sources, ())
 
     def test_unknown_default_and_echo_are_distinct_from_successful_empty(self):

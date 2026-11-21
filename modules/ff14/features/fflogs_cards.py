@@ -25,7 +25,10 @@ PROVIDER_CATALOG_SCOPE = (
     "各地区开放状态需另行确认。"
 )
 HISTORY_INCOMPLETE = "历史成绩未查全，可能遗漏旧版本记录"
-DETAIL_LIMITATION = "次数仅为当前筛选范围；最高数值与最佳百分位可能来自不同记录。"
+DETAIL_LIMITATION = (
+    "过本次数为当前筛选范围的公开记录下限；最高数值与最佳百分位可能来自不同记录。"
+)
+CATALOG_KILL_LIMITATION = "次数基于 FFLogs 公开记录；≥ 表示下限，— 表示未知。"
 
 # FFLogs grade colors are game policy, never inferred by Core or altered by theme.
 PERCENTILE_COLORS = (
@@ -100,12 +103,19 @@ def amount(value: object) -> cards.Inline:
 
 
 def kill_count(value: object) -> cards.Inline:
-    """Only the parsed per-encounter totalKills is supplied here, never a size."""
-    if value is None:
-        return cards.Inline((cards.Span("—"),))
     if type(value) is not int or not 0 <= value <= 2_147_483_647:
-        return cards.Inline((cards.Span("ERR", color="#d34b4b"),))
+        return cards.Inline((cards.Span("—"),))
     return cards.Inline((cards.Span(str(value), emphasis="strong"),))
+
+
+def _ranking_kills(row, *, catalog_layout):
+    if row.public_kills_exact is not None:
+        return kill_count(row.public_kills_exact)
+    count = row.public_kills_lower_bound if catalog_layout else row.total_kills
+    if not catalog_layout and row.source_error:
+        count = None
+    # A zero in a partial scope cannot establish a public total of zero.
+    return kill_count(count or None)
 
 
 def selection_title(
@@ -186,7 +196,8 @@ def character_card(
     )
     sections = []
     displayed_count = 0
-    if character.groups or character.catalog_evaluated:
+    catalog_layout = bool(character.groups or character.catalog_evaluated)
+    if catalog_layout:
         present = tuple(
             category
             for category in ("ultimate", "savage")
@@ -272,34 +283,39 @@ def character_card(
                 panel=False,
             )
         )
+    subtitle = f"最终幻想 XIV · FFLogs · {'CN' if realm == 'cn' else 'Global'}"
+    notices = _card_notices(character, limit, displayed_count, catalog_layout)
+    if catalog_layout:
+        subtitle = " · ".join((subtitle, *notices))
+        caption = f"版本对应最佳 {metric} 百分位。" if displayed_count else ""
+    else:
+        domain = "cn.fflogs.com" if realm == "cn" else "www.fflogs.com"
+        caption = "\n".join(
+            (
+                f"数据源：{domain}",
+                f"最高 {metric} 与最佳百分位可能来自不同场次",
+                *notices,
+            )
+        )
+    if caption:
+        sections.append(cards.Text(caption, style="caption"))
     document = ff14_card(
         f"{character.name} @ {character.server_name}",
         category="Logs",
-        subtitle=f"最终幻想 XIV · FFLogs · {'CN' if realm == 'cn' else 'Global'}",
+        subtitle=subtitle,
         layout="table",
-        blocks=(
-            *sections,
-            cards.Text(
-                _card_notes(character, realm, limit, displayed_count, metric),
-                style="caption",
-            ),
-        ),
+        blocks=tuple(sections),
         sources=(),
     )
 
-    catalog_layout = bool(character.groups or character.catalog_evaluated)
     return _single_line_layout(document, catalog_layout=catalog_layout)
 
 
-def _card_notes(character, realm, limit, displayed_count, metric):
-    notes = [
-        f"数据源：{'cn.fflogs.com' if realm == 'cn' else 'www.fflogs.com'}",
-        "版本为统计分区；次数为该分区过本次数",
-        f"最高 {metric} 与最佳百分位可能来自不同场次",
-    ]
+def _card_notices(character, limit, displayed_count, catalog_layout):
+    notes = []
     # Inspect the actual displayed table strings; plain text keeps '*' literal.
     displayed = displayed_rankings(character, limit)
-    if any(record_version(row).startswith("*") for row in displayed):
+    if catalog_layout and any(record_version(row).startswith("*") for row in displayed):
         notes.append("* 非标准阵容")
     if any(row.query_state == "excluded_echo" for row in displayed):
         notes.append("超越之力分区已排除")
@@ -322,11 +338,11 @@ def _card_notes(character, realm, limit, displayed_count, metric):
         for warning in character.catalog_warnings
     ):
         notes.append("部分记录未取得")
-    if not character.catalog_evaluated and not character.groups:
+    if not catalog_layout:
         notes.append(CATALOG_LIMITATION)
     if len(character.rankings) > displayed_count:
         notes.append("部分记录未展示")
-    return "\n".join(notes)
+    return notes
 
 
 def displayed_rankings(character, limit):
@@ -438,7 +454,7 @@ def _ranking_table(
             job_display(row.spec, job_language),
             *((record_version(row),) if include_record_version else ()),
             amount("invalid") if row.source_error else amount(row.best_amount),
-            kill_count("invalid") if row.source_error else kill_count(row.total_kills),
+            _ranking_kills(row, catalog_layout=include_record_version),
             percentile("invalid")
             if row.source_error
             else percentile(

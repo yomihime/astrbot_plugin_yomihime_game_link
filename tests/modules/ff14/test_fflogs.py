@@ -77,12 +77,20 @@ class _FakeHttp:
         self.responses = deque(responses)
         self.requests: list[HttpRequest] = []
         self.duty_requests: list[HttpRequest] = []
+        self.kill_requests: list[HttpRequest] = []
 
     async def fetch(self, request: HttpRequest) -> HttpResponse:
         if request.source_id == "xivapi_items":
             self.duty_requests.append(request)
             return HttpResponse(
                 200, {"Content-Type": "application/json"}, b'{"results":[],"next":null}'
+            )
+        if request.body and b"query FF14PublicKillCounts" in request.body:
+            self.kill_requests.append(request)
+            return HttpResponse(
+                200,
+                {"Content-Type": "application/json"},
+                b'{"data":{"characterData":{"character":null}}}',
             )
         self.requests.append(request)
         response = self.responses.popleft()

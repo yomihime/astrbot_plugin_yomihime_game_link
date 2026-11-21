@@ -284,6 +284,7 @@ class FFLogsCardTests(unittest.TestCase):
                 )
                 self.assertEqual(card.sources, ())
                 self.assertIn(f"数据源：{domain}", card.blocks[-1].content)
+                self.assertNotIn("版本对应最佳", card.blocks[-1].content)
                 server = SimpleNamespace(
                     region=region,
                     name="Cerberus",
@@ -320,7 +321,8 @@ class FFLogsCardTests(unittest.TestCase):
         self.assertEqual(amount(None).spans[0].text, "—")
         self.assertEqual(kill_count(None).spans[0].text, "—")
         self.assertEqual(kill_count(0).spans[0].text, "0")
-        self.assertEqual(kill_count(True).spans[0].text, "ERR")
+        self.assertEqual(kill_count(14).spans[0].text, "14")
+        self.assertEqual(kill_count(True).spans[0].text, "—")
 
     def test_exact_json_percentile_never_becomes_raw_gold_through_float(self):
         body = json.dumps(fixture._character()).replace(
@@ -518,6 +520,34 @@ class FFLogsCardTests(unittest.TestCase):
                     self.assertEqual(table.columns[0].title, "副本")
         self.assertEqual(record.rankings[0].spec, "Astrologian")
 
+    def test_kill_column_uses_the_same_display_for_ultimate_and_savage(self):
+        base = character()
+        row = base.rankings[0]
+        rows = (
+            replace(row, public_kills_lower_bound=14, history_complete=False),
+            replace(row, public_kills_exact=16, public_kills_lower_bound=14),
+            replace(row, public_kills_exact=0),
+            replace(row, total_kills=None, source_error=True, query_state="failed"),
+        )
+        groups = tuple(
+            CharacterRankingGroup(i, kind, 3, -1, kind, "E", rows)
+            for i, kind in enumerate(("ultimate", "savage"), start=1)
+        )
+        card = character_card(
+            replace(base, groups=groups, rankings=rows * 2),
+            realm="cn",
+            host="cn.fflogs.com",
+            limit=40,
+            explicit_selection=False,
+        )
+        for section in card.blocks[:2]:
+            counts = [cells[4].spans[0].text for cells in section_rows(section)]
+            self.assertEqual(counts, ["14", "16", "0", "—"])
+        self.assertIn("部分记录未取得", card.subtitle)
+        self.assertEqual(
+            card.blocks[-1], cards.Text("版本对应最佳 rDPS 百分位。", style="caption")
+        )
+
     def test_display_budget_keeps_categories_and_reports_omitted_rows(self):
         base = character()
         row = base.rankings[0]
@@ -541,13 +571,7 @@ class FFLogsCardTests(unittest.TestCase):
             for section in sections
         ]
         self.assertEqual(counts, [39, 1])
-        self.assertTrue(
-            any(
-                "部分记录未展示" in block.content
-                for block in card.blocks
-                if isinstance(block, cards.Text)
-            )
-        )
+        self.assertIn("部分记录未展示", card.subtitle)
         one = character_card(
             record, realm="cn", host="cn.fflogs.com", limit=1, explicit_selection=False
         )
@@ -867,12 +891,7 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
             FFLogsCharacterLookup(fixture._services(http)), None, TARGET
         )
         self.assertTrue(any("绝境战目录" in warning for warning in result.warnings))
-        captions = [
-            block.content
-            for block in result.document.card.blocks
-            if isinstance(block, cards.Text)
-        ]
-        self.assertTrue(any("部分记录未取得" in caption for caption in captions))
+        self.assertIn("部分记录未取得", result.document.card.subtitle)
         self.assertEqual(result.document.card.blocks[0].title, "绝境战")
         self.assertEqual(section_rows(result.document.card.blocks[0]), ())
 
@@ -1272,15 +1291,7 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
                     any("副本归属不一致" in warning for warning in result.warnings),
                     True,
                 )
-                captions = [
-                    block.content
-                    for block in result.document.card.blocks
-                    if isinstance(block, cards.Text)
-                ]
-                self.assertEqual(
-                    any("部分记录未取得" in caption for caption in captions),
-                    True,
-                )
+                self.assertIn("部分记录未取得", result.document.card.subtitle)
                 self.assertEqual(
                     [
                         len(section_rows(section))
