@@ -12,7 +12,7 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_WHEEL_SHA256 = (
-    "0d741c2d998c63df481ec2fe5670048f04b7170e822616a3d8fe6816527b0324"
+    "c57509597148f37c84f874832c996937a18fb68340903dfbbe4f340519a6c2a3"
 )
 
 

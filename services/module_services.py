@@ -567,6 +567,7 @@ class _BoundAccountOperations(AccountOperations):
             "confirm_player_login", invocation, session_id, confirmation
         )
 
+    @public_boundary("service")
     async def bind(self, invocation: InvocationView, identity: ResolvedIdentity):
         proof(validate_contract, invocation)
         parameters(_canonical_input, identity, ResolvedIdentity)

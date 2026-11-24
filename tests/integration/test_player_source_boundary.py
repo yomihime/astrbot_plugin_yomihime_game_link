@@ -35,7 +35,7 @@ class PlayerSourceBoundary(unittest.IsolatedAsyncioTestCase):
     ):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            runtime = await build_runtime(root)
+            runtime = await build_runtime(root, private_sources=("catalog",))
             self.addAsyncCleanup(runtime.database.executor.close)
             module_id = "sample/alpha"
             repo = runtime.repositories

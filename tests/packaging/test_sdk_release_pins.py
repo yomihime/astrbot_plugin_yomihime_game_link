@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CLIS = ("scripts/configure_source_credentials.py", "scripts/admin_credentials.py")
 REVIEWED_RELEASE = "0.1.0a24"
 REVIEWED_WHEEL_SHA256 = (
-    "0d741c2d998c63df481ec2fe5670048f04b7170e822616a3d8fe6816527b0324"
+    "c57509597148f37c84f874832c996937a18fb68340903dfbbe4f340519a6c2a3"
 )
 
 

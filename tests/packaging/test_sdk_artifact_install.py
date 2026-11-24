@@ -17,7 +17,7 @@ from ygl_test_subject.extensions.disk_manifest import parse_manifest
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_WHEEL_SHA256 = (
-    "0d741c2d998c63df481ec2fe5670048f04b7170e822616a3d8fe6816527b0324"
+    "c57509597148f37c84f874832c996937a18fb68340903dfbbe4f340519a6c2a3"
 )
 EXPECTED_RESOURCES = {
     f"yomihime_game_link_sdk/_examples/{example}/{filename}"
