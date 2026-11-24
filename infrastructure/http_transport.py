@@ -68,6 +68,13 @@ async def _single_connection_attempt(request, handler):
         raise _ConnectionRetrySuppressed(_transport_error_code(exc)) from None
 
 
+async def _before_headers(session, trace_context, params):
+    # aiohttp calls this before serializing the headers, after connector waits.
+    check = trace_context.trace_request_ctx
+    if check is not None:
+        await check()
+
+
 def _transport_error_code(exc):
     """Closed exception families only; never inspect exception text or URLs."""
     if type(exc) is _ConnectionRetrySuppressed:
@@ -133,6 +140,12 @@ class AioHttpTransport:
                 float(request.timeout_seconds),
                 request.max_response_bytes,
                 source_id=declaration.source_id,
+                **(
+                    {"before_send": request._credential_proof.before_send}
+                    if request._credential_proof is not None
+                    and request._credential_proof.before_send is not None
+                    else {}
+                ),
             )
         except asyncio.CancelledError:
             diagnostic("transport_error", code="cancelled")
@@ -198,6 +211,7 @@ class AioHttpTransport:
         *,
         source_id: str,
         oauth: bool = False,
+        before_send=None,
     ) -> HttpResponse:
         session = await self._get_session()
         headers = dict(request_headers)
@@ -216,6 +230,7 @@ class AioHttpTransport:
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=float(timeout_seconds)),
                 allow_redirects=False,
+                **({"trace_request_ctx": before_send} if before_send else {}),
                 proxy=self._proxy_url,
                 ssl=True,
             ) as response:
@@ -272,12 +287,15 @@ class AioHttpTransport:
             if self._closed:
                 raise SourceHttpError("transport_failed") from None
             if self._session is None:
+                trace = aiohttp.TraceConfig()
+                trace.on_request_headers_sent.append(_before_headers)
                 self._session = aiohttp.ClientSession(
                     connector=aiohttp.TCPConnector(limit=16),
                     cookie_jar=aiohttp.DummyCookieJar(),
                     trust_env=False,
                     auto_decompress=False,
                     middlewares=(_single_connection_attempt,),
+                    trace_configs=[trace],
                 )
             return self._session
 

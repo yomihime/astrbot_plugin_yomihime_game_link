@@ -238,6 +238,9 @@ class _AuthenticatedRequestProof:
     authorization_digest: bytes = field(repr=False)
     timeout_seconds: float
     max_response_bytes: int
+    before_send: Callable[[], Awaitable[None]] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __repr__(self) -> str:
         return f"_AuthenticatedRequestProof(kind={self.kind!r})"
@@ -326,6 +329,7 @@ def _make_authenticated_request_proof(
     authorization: str,
     timeout_seconds: float,
     max_response_bytes: int,
+    before_send=None,
 ) -> _AuthenticatedRequestProof:
     if channel is None:
         raise SourceHttpError("credentials_unavailable") from None
@@ -344,6 +348,7 @@ def _make_authenticated_request_proof(
         _text_digest(authorization),
         timeout_seconds,
         max_response_bytes,
+        before_send,
     )
 
 
@@ -495,6 +500,7 @@ class SourceHttpService(SourceHttp):
         clock: Callable[[], float] = monotonic,
         module_id: str | None = None,
         credential_service: SourceCredentialAuthorizer | None = None,
+        player_policies=None,
         request_budget=None,
         budget_config=None,
     ) -> None:
@@ -545,6 +551,7 @@ class SourceHttpService(SourceHttp):
         self._clock = clock
         self._module_id = module_id
         self._credential_service = credential_service
+        self._player_policies = dict(player_policies or {})
         self._request_budget = request_budget
         self._budget_config = budget_config
         self._credential_channel = getattr(transport, "_credential_channel", None)
@@ -604,6 +611,7 @@ class SourceHttpService(SourceHttp):
         *,
         _check_authority: Callable[[], Awaitable[None]] | None = None,
         _authorization_request: bool = False,
+        _player=None,
     ) -> HttpResponse:
         """Fetch one request after enforcing the declared source policy."""
 
@@ -613,6 +621,8 @@ class SourceHttpService(SourceHttp):
             raise SourceHttpError("source_not_declared") from None
         if source.declaration.authorization_only and _authorization_request is not True:
             raise SourceHttpError("request_rejected") from None
+        if _player is not None and checked.source_id not in self._player_policies:
+            raise SourceHttpError("request_rejected")
         self._validate_limits(checked)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + float(source.declaration.timeout_seconds)
@@ -633,10 +643,29 @@ class SourceHttpService(SourceHttp):
             source_acquired = True
             await self._check_authority(_check_authority, deadline)
             diagnostic("http_quota")
-            lease = await self._credential_lease(source.declaration, checked, deadline)
+            player_policy = self._player_policies.get(checked.source_id)
+            before_send = None
+            if player_policy is None:
+                lease = await self._credential_lease(
+                    source.declaration, checked, deadline
+                )
+            else:
+                if _player is None or _check_authority is None:
+                    raise SourceHttpError("credentials_unavailable")
+                lease, still_granted = await self._wait_for_deadline(
+                    _player(player_policy, checked), deadline
+                )
+
+                async def before_send():
+                    try:
+                        await still_granted()
+                        await _check_authority()
+                    except Exception:
+                        raise SourceHttpError("request_rejected") from None
+
             await self._check_authority(_check_authority, deadline)
             result = await self._perform_resource_request(
-                source.declaration, checked, lease, deadline
+                source.declaration, checked, lease, deadline, before_send=before_send
             )
             response = self._validate_response(result)
             await self._check_authority(_check_authority, deadline)
@@ -646,7 +675,13 @@ class SourceHttpService(SourceHttp):
                 http_status=response.status_code,
             )
             self._ensure_remaining(deadline)
-            if response.status_code == 401 and lease is not None:
+            if before_send is not None:
+                await self._check_authority(before_send, deadline)
+            if (
+                response.status_code == 401
+                and lease is not None
+                and before_send is None
+            ):
                 await self._invalidate_credential(source.declaration, lease, deadline)
                 if checked.method == "GET":
                     refreshed = await self._credential_lease(
@@ -896,6 +931,8 @@ class SourceHttpService(SourceHttp):
         checked: HttpRequest,
         lease: CredentialLease | None,
         deadline: float,
+        *,
+        before_send=None,
     ) -> HttpResponse:
         validate_contract(declaration)
         validate_contract(checked)
@@ -942,6 +979,7 @@ class SourceHttpService(SourceHttp):
                 authorization=lease.authorization,
                 timeout_seconds=remaining,
                 max_response_bytes=self._max_response_bytes,
+                before_send=before_send,
             )
         transport_request = TransportRequest(
             declaration.source_id,
@@ -966,6 +1004,8 @@ class SourceHttpService(SourceHttp):
             else:
                 await self._reserve_quota(source, deadline)
             diagnostic("http_transport")
+            if before_send is not None:
+                await self._check_authority(before_send, deadline)
             response = self._validate_response(
                 await self._wait_for_deadline(
                     self._invoke_transport(transport_request), deadline

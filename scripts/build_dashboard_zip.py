@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = ROOT / "dist" / "astrbot_plugin_yomihime_game_link-local.zip"
 EXPECTED_WHEEL_SHA256 = (
-    "0d741c2d998c63df481ec2fe5670048f04b7170e822616a3d8fe6816527b0324"
+    "c57509597148f37c84f874832c996937a18fb68340903dfbbe4f340519a6c2a3"
 )
 EXPECTED_WHEEL_ENTRIES = {
     "yomihime_game_link_sdk/jobs.py",
@@ -65,6 +65,7 @@ ROOT_FILES = (
     "CHANGELOG.md",
     "requirements.txt",
     "requirements-news-screenshot.txt",
+    "requirements-player-issuer.txt",
     "ygl-plugin.json",
 )
 HOST_METADATA_FILES = (

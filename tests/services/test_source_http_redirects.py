@@ -43,6 +43,15 @@ class RedirectTests(unittest.IsolatedAsyncioTestCase):
             HttpResponse(302, {"Location": "/id/example/?l=english"}, b""),
             HttpResponse(200, {}, b"public", "https://forged.test/fake"),
         )
+
+        async def spend_first_hop_time(number):
+            if number == 1:
+                loop = asyncio.get_running_loop()
+                started = loop.time()
+                while loop.time() == started:
+                    await asyncio.sleep(0.001)
+
+        chain.after_call = spend_first_hop_time
         service = SourceHttpService((_source(),), chain)
         response = await service.fetch(HttpRequest("public", "/profiles/123/"))
         self.assertEqual(response.final_url, "https://public.example.test/id/example/")

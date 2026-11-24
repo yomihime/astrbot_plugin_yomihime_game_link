@@ -161,7 +161,7 @@ class _RuntimeInstance:
         )
 
 
-def _manifest(module_id: str, dependencies=()) -> ModuleManifest:
+def _manifest(module_id: str, dependencies=(), *, private_sources=()) -> ModuleManifest:
     descriptor = validate_contract(
         CapabilityDescriptor(
             "read",
@@ -188,6 +188,7 @@ def _manifest(module_id: str, dependencies=()) -> ModuleManifest:
             InvocationPolicy.COMMAND_ONLY,
             CapabilityEffect.READ_ONLY,
             privacy_floor=PrivacyFloor.PRIVATE,
+            required_sources=private_sources,
         )
     )
     capabilities = (
@@ -274,6 +275,7 @@ async def build_runtime(
     *,
     registry: Registry | None = None,
     issuer: ContextIssuer | None = None,
+    private_sources: tuple[str, ...] = (),
 ) -> B03Runtime:
     """Build or reopen reviewed SQLite repositories around trusted host state."""
 
@@ -292,6 +294,7 @@ async def build_runtime(
                 validate_contract(CapabilityReference("sample/beta", "read")),
                 validate_contract(CapabilityReference("sample/alpha", "private.read")),
             ),
+            private_sources=private_sources,
         )
         package = validate_contract(
             PackageManifest(
