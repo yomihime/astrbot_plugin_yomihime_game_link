@@ -23,7 +23,12 @@ class HandlerDispatch:
         self._waiting = {True: 0, False: 0}
 
     async def run(
-        self, start: Callable[[], Awaitable[T]], *, background: bool, deadline, clock,
+        self,
+        start: Callable[[], Awaitable[T]],
+        *,
+        background: bool,
+        deadline,
+        clock,
         after_wait: Callable[[], Awaitable[None]] | None = None,
     ) -> T:
         # asyncio semaphores retain FIFO order among their waiters. Background

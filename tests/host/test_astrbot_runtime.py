@@ -1273,7 +1273,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         core = runtime.core_runtime
         self.assertIs(core.jobs._dispatch, core.scheduler._dispatch)
         self.assertIs(core.gateway._dispatch, core.jobs._dispatch)
-        handler = core.registry.snapshot().module("ff14/ff14").handlers.capabilities["status"]
+        handler = (
+            core.registry.snapshot().module("ff14/ff14").handlers.capabilities["status"]
+        )
         original = handler.invoke
         seen = []
 
@@ -1282,7 +1284,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             return await original(view, parameters)
 
         try:
-            with patch.object(type(handler), "invoke", autospec=True, side_effect=capture):
+            with patch.object(
+                type(handler), "invoke", autospec=True, side_effect=capture
+            ):
                 for kind in ("FriendMessage", "GroupMessage", "OtherMessage"):
                     event = self._event(kind)
                     event.platform = "webchat"
