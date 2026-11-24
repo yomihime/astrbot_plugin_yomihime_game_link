@@ -140,6 +140,10 @@ class AccountOperations(Protocol):
 
     async def begin_login(self, invocation: InvocationView) -> str: ...
 
+    async def confirm_player_login(
+        self, invocation: InvocationView, session_id: str, confirmation: str
+    ) -> GrantReference: ...
+
     async def bind(
         self, invocation: InvocationView, identity: ResolvedIdentity
     ) -> BindingView: ...
@@ -241,6 +245,8 @@ class HttpBudgetStatus:
 
 class SourceHttp(Protocol):
     async def fetch(self, request: HttpRequest) -> HttpResponse: ...
+
+    async def fetch_player(self, request: HttpRequest) -> HttpResponse: ...
 
     async def budget(self, source_id: str) -> HttpBudgetStatus:
         """Shared local rolling-hour wire-attempt budget, excluding cache hits."""

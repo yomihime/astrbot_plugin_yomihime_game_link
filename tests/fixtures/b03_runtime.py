@@ -188,6 +188,7 @@ def _manifest(module_id: str, dependencies=()) -> ModuleManifest:
             InvocationPolicy.COMMAND_ONLY,
             CapabilityEffect.READ_ONLY,
             privacy_floor=PrivacyFloor.PRIVATE,
+            required_sources=("catalog",),
         )
     )
     capabilities = (

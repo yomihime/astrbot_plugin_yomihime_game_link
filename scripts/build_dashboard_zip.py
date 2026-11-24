@@ -65,6 +65,7 @@ ROOT_FILES = (
     "CHANGELOG.md",
     "requirements.txt",
     "requirements-news-screenshot.txt",
+    "requirements-player-issuer.txt",
     "ygl-plugin.json",
 )
 HOST_METADATA_FILES = (

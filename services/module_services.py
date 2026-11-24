@@ -108,6 +108,7 @@ from .identity import IdentityResolverService, InvocationPrincipalResolver
 from .jobs import InvocationJobs
 from .managed_resources import ResourceCapacityError
 from .module_storage import ModuleStorageRouter
+from .player_source import PlayerReadPolicy
 from .records import ModuleRecordsService, _collection_name
 from .resources import ResourceAccessService, _asset_id
 from .source_credentials import (
@@ -474,6 +475,11 @@ class _AccountOperations(AccountOperations):
         validate_contract(invocation)
         return await self._authorization.begin_login(invocation)
 
+    async def confirm_player_login(self, invocation, session_id, confirmation):
+        return await self._authorization.confirm_player_login(
+            invocation, session_id, confirmation
+        )
+
     async def bind(
         self, invocation: InvocationView, identity: ResolvedIdentity
     ) -> BindingView:
@@ -556,6 +562,11 @@ class _BoundAccountOperations(AccountOperations):
         return await self._call("begin_login", invocation)
 
     @public_boundary("service")
+    async def confirm_player_login(self, invocation, session_id, confirmation):
+        return await self._call(
+            "confirm_player_login", invocation, session_id, confirmation
+        )
+
     async def bind(self, invocation: InvocationView, identity: ResolvedIdentity):
         proof(validate_contract, invocation)
         parameters(_canonical_input, identity, ResolvedIdentity)
@@ -593,7 +604,12 @@ def _canonical_input(value, expected):
 
 
 def _account_output(name, result):
-    expected = {"status": GrantReference, "bind": BindingView, "bindings": BindingView}
+    expected = {
+        "confirm_player_login": GrantReference,
+        "status": GrantReference,
+        "bind": BindingView,
+        "bindings": BindingView,
+    }
     if name == "begin_login":
         if type(result) is not str or not result.strip():
             raise ValueError("login response is invalid")
@@ -1199,7 +1215,7 @@ class _BoundResources:
 
 
 class _BoundHttp:
-    __slots__ = ("__http", "__check_sync", "__check", "__read_only")
+    __slots__ = ("__http", "__check_sync", "__check", "__read_only", "__player")
 
     def __init__(
         self,
@@ -1207,14 +1223,25 @@ class _BoundHttp:
         check_sync: Callable[[], None],
         check: Callable[[], Awaitable[None]],
         read_only: bool = False,
+        player=None,
     ) -> None:
         object.__setattr__(self, "_BoundHttp__http", http)
+        object.__setattr__(self, "_BoundHttp__player", player)
         object.__setattr__(self, "_BoundHttp__read_only", read_only)
         object.__setattr__(self, "_BoundHttp__check_sync", check_sync)
         object.__setattr__(self, "_BoundHttp__check", check)
 
     @public_boundary("service")
     async def fetch(self, request: HttpRequest) -> HttpResponse:
+        return await self.__fetch(request, player=None)
+
+    @public_boundary("service")
+    async def fetch_player(self, request: HttpRequest) -> HttpResponse:
+        if self.__player is None:
+            raise SourceHttpError("request_rejected")
+        return await self.__fetch(request, player=self.__player)
+
+    async def __fetch(self, request, player):
         parameters(_canonical_input, request, HttpRequest)
         if self.__read_only and (request.method != "GET" or request.body is not None):
             raise SourceHttpError("request_rejected")
@@ -1229,7 +1256,9 @@ class _BoundHttp:
             except (InvocationBindingError, AccessDenied):
                 raise SourceHttpError("request_rejected") from None
 
-        response = await self.__http.fetch(request, _check_authority=check_authority)
+        response = await self.__http.fetch(
+            request, _check_authority=check_authority, _player=player
+        )
         try:
             await self.__check()
         except (InvocationBindingError, AccessDenied):
@@ -1801,7 +1830,19 @@ class InvocationServiceBinder:
                 and owner_capability.privacy_floor is PrivacyFloor.PUBLIC
                 and owner_capability.effect is CapabilityEffect.READ_ONLY,
             ),
-            http=_BoundHttp(self._http, check_sync, check, read_only=is_job),
+            http=_BoundHttp(
+                self._http,
+                check_sync,
+                check,
+                read_only=is_job,
+                player=lambda policy, request: policy.acquire(
+                    invocation,
+                    request,
+                    self._authorization,
+                    self._repositories,
+                    owner_command=is_owner,
+                ),
+            ),
             resources=_BoundResources(
                 resources,
                 check_sync,
@@ -1836,6 +1877,8 @@ class ModuleServicesFactory:
         "_identity_namespace",
         "_http_transport",
         "_source_credential_policies",
+        "_player_read_policies",
+        "_player_issuers",
         "_source_request_budget",
         "_exchange_verifier",
         "_caller_issuer",
@@ -1870,6 +1913,8 @@ class ModuleServicesFactory:
         principal_resolver: InvocationPrincipalResolver | None = None,
         owner_authority: object | None = None,
         source_credential_policies: Sequence[SourceCredentialPolicy] = (),
+        player_read_policies: Sequence[PlayerReadPolicy] = (),
+        player_issuers=(),
         secret_available: SecretAvailability | None = None,
         exchange_verifier: Callable[..., object] | None = None,
         clock: Callable[[], float] = monotonic,
@@ -1958,9 +2003,25 @@ class ModuleServicesFactory:
         self._identity_namespace = identity_namespace
         self._http_transport = http_transport
         self._source_credential_policies = credential_policies
+        player_policies = tuple(player_read_policies)
+        if any(type(p) is not PlayerReadPolicy for p in player_policies):
+            raise TypeError("invalid player read policy")
+        self._player_read_policies = {
+            (p.module_id, p.source_id): p for p in player_policies
+        }
+        if len(self._player_read_policies) != len(player_policies):
+            raise ValueError("duplicate player read policy")
         from .source_request_budget import SourceRequestBudget
 
         self._source_request_budget = SourceRequestBudget(repositories.database)
+        issuers = tuple(player_issuers)
+        if issuers and exchange_verifier is not None:
+            raise ValueError("ambiguous player credential authority")
+        if any(i.policy not in player_policies for i in issuers) or len(
+            {i.policy.module_id for i in issuers}
+        ) != len(issuers):
+            raise ValueError("player issuer needs one approved module policy")
+        self._player_issuers = {i.policy.module_id: i for i in issuers}
         self._exchange_verifier = exchange_verifier
         self._caller_issuer = _IssuerCallerCapabilityIssuer(issuer, registry)
         self._service_lifetimes: WeakSet[_ServiceLifetime] = WeakSet()
@@ -2021,7 +2082,7 @@ class ModuleServicesFactory:
             )
         return self._build_module(module_id, manifest, service_lifetime)
 
-    def _new_authorization(self) -> AuthorizationService:
+    def _new_authorization(self, module_id=None) -> AuthorizationService:
         return AuthorizationService(
             self._repositories.authorization,
             self._repositories.authorization,
@@ -2034,7 +2095,13 @@ class ModuleServicesFactory:
             principal_resolver=self._principal_resolver,
             secret_store=self._repositories.secret_store,
             secret_available=self._secret_available,
-            exchange_verifier=self._exchange_verifier,
+            exchange_verifier=(
+                self._player_issuers[module_id].verifier(
+                    self._repositories.secret_store, self._repositories.authorization
+                )
+                if module_id in self._player_issuers
+                else self._exchange_verifier
+            ),
             admission=self._lifecycle.admission,
             now=self._utc_clock,
         )
@@ -2158,7 +2225,7 @@ class ModuleServicesFactory:
             admission=self._lifecycle.admission,
             principal_resolver=self._principal_resolver,
         )
-        authorization = self._new_authorization()
+        authorization = self._new_authorization(module_id)
         cached_http = self._http_by_module.get(module_id)
         if cached_http is None or cached_http[0] != manifest:
             credential_policies = tuple(
@@ -2185,11 +2252,32 @@ class ModuleServicesFactory:
                 self._credential_services.append(
                     (module_id, manifest, credential_service)
                 )
+            player = {
+                source: policy
+                for (module, source), policy in self._player_read_policies.items()
+                if module == module_id
+            }
+            issuer = self._player_issuers.get(module_id)
+            if issuer is not None and not any(
+                cap.capability_id == issuer.policy.capability_id
+                and cap.privacy_floor is PrivacyFloor.OWNER
+                for cap in manifest.capabilities
+            ):
+                raise ValueError("player issuer requires an owner capability")
+            if player.keys() - {source.source_id for source in effective_sources}:
+                raise ValueError("missing declared player source")
+            effective_sources = tuple(
+                player[source.source_id].bind(manifest, source)
+                if source.source_id in player
+                else source
+                for source in effective_sources
+            )
             http = SourceHttpService(
                 effective_sources,
                 self._http_transport,
                 module_id=module_id,
                 credential_service=credential_service,
+                player_policies=player,
                 request_budget=self._source_request_budget,
                 budget_config=config,
                 clock=self._clock,
@@ -2256,7 +2344,15 @@ class ModuleServicesFactory:
                 accounts=_LifetimePort(
                     bundle.accounts,
                     service_lifetime,
-                    {"status", "begin_login", "bind", "bindings", "unbind", "revoke"},
+                    {
+                        "status",
+                        "begin_login",
+                        "confirm_player_login",
+                        "bind",
+                        "bindings",
+                        "unbind",
+                        "revoke",
+                    },
                 ),
                 subscriptions=_LifetimePort(
                     bundle.subscriptions,

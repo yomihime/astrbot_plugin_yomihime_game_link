@@ -571,6 +571,7 @@ class AstrBotRuntime:
         image_factory: ImageFactory | None = None,
         core_factory: Callable[..., CoreRuntime] = CoreRuntime,
         http_transport_factory: Callable[[], object] | None = None,
+        player_issuers=(),
         font_manager_factory=ManagedFont,
         bundled_selection: ReviewedBundleSelection | None = DEFAULT_BUNDLE_SELECTION,
     ) -> None:
@@ -618,6 +619,7 @@ class AstrBotRuntime:
         self._core_factory = core_factory
         if http_transport_factory is not None and not callable(http_transport_factory):
             raise TypeError("http_transport_factory must be callable")
+        self._player_issuers = tuple(player_issuers)
         self._http_transport_factory = http_transport_factory
         self._lock = asyncio.Lock()
         self._evidence_seal = object()
@@ -2150,6 +2152,8 @@ class AstrBotRuntime:
                     commentary_port=AstrBotSubscriptionCommentary(self._context),
                     analysis_port=AstrBotCommandAnalysis(self._context),
                     source_credential_policies=self._source_credential_policies,
+                    player_issuers=self._player_issuers,
+                    player_read_policies=tuple(i.policy for i in self._player_issuers),
                     managed_source_credentials=(
                         (self._assembly.managed_credentials if self._assembly else ())
                         + self._external_source_policies.managed_credentials

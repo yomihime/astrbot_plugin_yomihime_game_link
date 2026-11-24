@@ -116,6 +116,7 @@ from .output import (
     _require_public_fact_resources,
 )
 from .owner_authority import OwnerRouteProofAuthority
+from .player_source import PlayerReadPolicy
 from .runtime_effect_gate import EffectRejected
 from .scheduler import (
     ExecutionClaimProofRegistry,
@@ -505,6 +506,8 @@ class CoreRuntime:
         capability_timeouts: Mapping[tuple[str, str], float] | None = None,
         collector_timeouts: Mapping[tuple[str, str], float] | None = None,
         source_credential_policies: Sequence[SourceCredentialPolicy] = (),
+        player_read_policies: Sequence[PlayerReadPolicy] = (),
+        player_issuers=(),
         managed_source_credentials=(),
         commentary_port=None,
         analysis_port=None,
@@ -773,6 +776,8 @@ class CoreRuntime:
             principal_resolver=self.principal_resolver,
             owner_authority=self.owner_authority,
             source_credential_policies=source_credential_policies,
+            player_read_policies=player_read_policies,
+            player_issuers=player_issuers,
             clock=monotonic_clock,
             utc_clock=utc_clock,
             module_host_config_snapshots=host_config_snapshots,

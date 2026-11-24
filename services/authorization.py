@@ -620,6 +620,58 @@ class AuthorizationService:
             raise AuthorizationPermissionError()
         return current
 
+    async def require_player_read_grant(
+        self, invocation, *, source_scope, credential_field
+    ):
+        """Select only the current actor's unique, purpose-bound credential."""
+        from ..yomihime_game_link_sdk.contexts import InvocationConversationKind
+        from ..yomihime_game_link_sdk.subscriptions import ConversationKind
+
+        checked, principal_id, module_id = await self._scope(invocation)
+        if (
+            checked.origin is not InvocationOrigin.COMMAND
+            or checked.parent_id is not None
+            or checked.conversation_kind is not InvocationConversationKind.DIRECT
+            or checked.grant_id is not None
+            or checked.grant_revision is not None
+            or self._conversation_repository is None
+        ):
+            raise AuthorizationPermissionError()
+
+        async def selected():
+            room = await self._conversation_repository.current(
+                checked.adapter_id, checked.conversation_id
+            )
+            if (
+                room is None
+                or room.kind is not ConversationKind.DIRECT
+                or room.adapter_id != checked.adapter_id
+                or room.conversation_id != checked.conversation_id
+            ):
+                raise AuthorizationPermissionError()
+            grants = await self._grants.list_for(principal_id, module_id)
+            self._check_live(checked)
+            rows = [
+                row
+                for row in grants
+                if row.principal_id == principal_id
+                and row.module_id == module_id
+                and row.status is GrantStatus.ACTIVE
+                and (row.expires_at is None or row.expires_at > self._utc_now())
+                and source_scope in row.scopes
+                and row.secret_ref is not None
+                and row.secret_ref.field == credential_field
+            ]
+            if len(rows) != 1:
+                raise AuthorizationPermissionError()
+            return rows[0]
+
+        result = await selected()
+        if not await self._has_secret(result) or await selected() != result:
+            raise AuthorizationPermissionError()
+        self._check_live(checked)
+        return result
+
     def _grant_is_current(
         self,
         grant: Grant,
@@ -839,6 +891,64 @@ class AuthorizationService:
             raise AuthorizationPermissionError("authorization exchange is unverified")
         return result
 
+    async def confirm_player_login(self, invocation, session_id, confirmation):
+        """Complete only a host-registered player issuer's direct root command."""
+        from ..yomihime_game_link_sdk.contexts import InvocationConversationKind
+        from ..yomihime_game_link_sdk.subscriptions import ConversationKind
+        from .player_issuer import BoundPlayerIssuer
+
+        checked, _, module = await self._scope(invocation)
+        verifier = self._exchange_verifier
+        if (
+            not isinstance(verifier, BoundPlayerIssuer)
+            or module != verifier.policy.module_id
+            or checked.capability_id != verifier.policy.capability_id
+            or checked.conversation_kind is not InvocationConversationKind.DIRECT
+            or checked.origin is not InvocationOrigin.COMMAND
+            or checked.parent_id is not None
+            or checked.grant_id is not None
+            or self._conversation_repository is None
+        ):
+            raise AuthorizationPermissionError()
+        room = await self._conversation_repository.current(
+            checked.adapter_id, checked.conversation_id
+        )
+        if room is None or room.kind is not ConversationKind.DIRECT:
+            raise AuthorizationPermissionError()
+        async with self._mutation(f"authorization-complete:{module}"):
+            staged = []
+
+            async def before_commit():
+                check, _, _ = await self._scope(checked)
+                room = await self._conversation_repository.current(
+                    check.adapter_id, check.conversation_id
+                )
+                if room is None or room.kind is not ConversationKind.DIRECT:
+                    raise AuthorizationPermissionError()
+                self._check_live(check)
+
+            try:
+                return await self._complete_login_locked(
+                    checked,
+                    session_id,
+                    confirmation,
+                    staged=staged,
+                    before_commit=before_commit,
+                )
+            except BaseException as failure:
+                for grant in staged:
+                    ref = grant.secret_ref
+                    await verifier.recover_failed_attempt(
+                        SecretOwner(
+                            grant.principal_id,
+                            grant.module_id,
+                            ref.field,
+                            ref.operation_id,
+                        ),
+                        failure,
+                    )
+                raise
+
     async def complete_login(
         self,
         invocation: InvocationView,
@@ -862,6 +972,8 @@ class AuthorizationService:
         exchange: object,
         *,
         generation: int | None = None,
+        staged=None,
+        before_commit=None,
     ) -> GrantReference:
         """Commit a verified exchange only for the current login generation."""
 
@@ -899,6 +1011,8 @@ class AuthorizationService:
         ):
             raise AuthorizationPermissionError()
         grant = await self._verify_exchange(session, exchange)
+        if staged is not None:
+            staged.append(grant)
         if (
             grant.principal_id != principal_id
             or grant.module_id != module_id
@@ -978,6 +1092,8 @@ class AuthorizationService:
                 )
             elif existing is not None:
                 raise AuthorizationConflict()
+        if before_commit is not None:
+            await before_commit()
         try:
             persisted_session, persisted = await self._grants.complete_login(
                 completed,

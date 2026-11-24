@@ -110,6 +110,7 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
         sequence=1,
         *,
         source_transform=None,
+        manifest_transform=None,
         requirements=None,
         required_features=(),
         payload_mib=0,
@@ -167,6 +168,8 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 b"evaluators={}", b'evaluators={}, jobs={"work": JobHandler()}'
             )
             source += b"\nimport asyncio\nENTERED=asyncio.Event()\nRELEASE=asyncio.Event()\nCANCELLED=asyncio.Event()\nDENIED=asyncio.Event()\nLIVE=0\nclass JobHandler:\n    async def run(self, invocation, parameters, control):\n        global LIVE\n        LIVE += 1\n        try:\n            if parameters.get('hold'):\n                ENTERED.set()\n                while not RELEASE.is_set():\n                    try:\n                        await RELEASE.wait()\n                    except asyncio.CancelledError:\n                        CANCELLED.set()\n                try:\n                    await control.update({'late': True})\n                except Exception:\n                    DENIED.set()\n            return {'finished': True}\n        finally:\n            LIVE -= 1\n"
+        if manifest_transform is not None:
+            manifest_transform(manifest)
         if source_transform is not None:
             source = source_transform(source)
         files = {

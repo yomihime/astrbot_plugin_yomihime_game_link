@@ -58,3 +58,17 @@ class RuntimeDependencyTests(unittest.TestCase):
         self.assertEqual(optional[0].name, "playwright")
         self.assertIn(Version("1.62.0"), optional[0].specifier)
         self.assertNotIn("playwright", (ROOT / "requirements.txt").read_text().lower())
+
+    def test_player_ticket_verifier_dependency_belongs_to_its_host_composition(self):
+        from scripts.build_dashboard_zip import ROOT_FILES
+
+        name = "requirements-player-issuer.txt"
+        self.assertIn(name, ROOT_FILES)
+        deps = [
+            Requirement(line)
+            for line in (ROOT / name).read_text().splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+        self.assertEqual([item.name for item in deps], ["PyJWT"])
+        self.assertIn(Version("2.10.1"), deps[0].specifier)
+        self.assertNotIn("pyjwt", (ROOT / "requirements.txt").read_text().lower())
