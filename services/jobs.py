@@ -13,6 +13,7 @@ from weakref import WeakSet
 
 from ..core.contracts.validation import _validate
 from ..core.contracts.validation_boundary import validate_contract
+from ..core.handler_dispatch import HandlerDispatch
 from ..core.ports_jobs import JobError, JobRunProof, declaration_digest
 from ..core.public_errors import public_boundary
 from ..core.task_scope import ScopeDeadlineExceeded, ScopeStopTimeout, TaskScope
@@ -186,6 +187,7 @@ class JobsService:
         bind_services,
         resource_repository=None,
         render_document=None,
+        dispatch=None,
         max_running=2,
         max_queued=128,
         max_result_bytes=64 * 1024 * 1024,
@@ -195,6 +197,7 @@ class JobsService:
             if type(bound) is not int or bound < 1:
                 raise ValueError("job limits must be positive integers")
         self.repository = SQLiteJobRepository(database)
+        self._dispatch = dispatch or HandlerDispatch()
         self.registry, self.issuer, self.lifecycle = registry, issuer, lifecycle
         self.principal_resolver = principal_resolver
         self.bind_services, self.render_document = bind_services, render_document
@@ -814,6 +817,7 @@ class JobsService:
             control = _Control(self, row, invocation, check)
 
             async def execute_handler():
+                check()
                 active["execution"] = asyncio.current_task()
                 if active["revoked"] or row["module_id"] in self._draining_modules:
                     raise JobError("job_run_revoked")
@@ -822,7 +826,16 @@ class JobsService:
                 )
 
             work = asyncio.create_task(
-                scope.await_result(run_effect(execute_handler)),
+                scope.await_result(
+                    run_effect(
+                        lambda: self._dispatch.run(
+                            execute_handler,
+                            background=True,
+                            deadline=deadline,
+                            clock=monotonic,
+                        )
+                    )
+                ),
                 name="ygl:job-owned-work",
             )
             active["work"] = work

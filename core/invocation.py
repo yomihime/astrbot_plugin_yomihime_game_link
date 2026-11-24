@@ -55,6 +55,7 @@ from .admission import AdmissionError
 from .context_issuer import ContextIssuer, InvalidInvocation
 from .contracts.validation import validate_parameters
 from .contracts.validation_boundary import validate_contract
+from .handler_dispatch import HandlerDispatch
 from .invocation_budget import InvocationBudgetPolicy
 from .lifecycle import LifecycleController, LifecycleError
 from .policy import origin_allowed, tool_allowed
@@ -210,6 +211,7 @@ class Gateway:
         budget_policy: InvocationBudgetPolicy | None = None,
         clock: Callable[[], float] = monotonic,
         diagnostics: SyncDiagnostics | None = None,
+        dispatch: HandlerDispatch | None = None,
     ) -> None:
         validate_contract(private_authorizer)
         validate_contract(public_fact_guard)
@@ -247,6 +249,7 @@ class Gateway:
             raise ValueError("handler_timeout must be positive")
         if not callable(clock):
             raise TypeError("clock must be callable")
+        self._dispatch = dispatch or HandlerDispatch()
         self._registry = registry
         self._issuer = issuer
         self._admission = admission
@@ -504,10 +507,20 @@ class Gateway:
             lease = self._admission.admit(view, view.capability_id)
             self._require_current(view, lease)
             scope = self._lifecycle.scope(view.module_id)
-            diagnostic("handler_start")
-            result = await scope.run(
-                module.handlers.capabilities[view.capability_id].invoke(
+
+            async def invoke_current():
+                self._require_current(view, lease)
+                diagnostic("handler_start")
+                return await module.handlers.capabilities[view.capability_id].invoke(
                     view, validated
+                )
+
+            result = await scope.run(
+                self._dispatch.run(
+                    invoke_current,
+                    background=False,
+                    deadline=view.deadline,
+                    clock=self._clock,
                 ),
                 name=f"gateway:web:{view.capability_id}",
                 deadline_monotonic=view.deadline,
@@ -787,6 +800,18 @@ class Gateway:
             )
             scope = lifecycle.scope(trusted.module_id)
 
+            async def recheck_queued_authority():
+                try:
+                    if owner:
+                        await self._owner_authority.require_current(trusted)
+                    elif capability.privacy_floor is PrivacyFloor.PRIVATE:
+                        grant = await self._private_authorizer(trusted)
+                        self._require_private_grant(grant, trusted)
+                    if tool:
+                        await self._issuer._check_message_source(trusted)
+                except Exception as error:
+                    raise _MessageSourceRejected() from error
+
             async def invoke_current():
                 # TaskScope schedules this coroutine. Check in the actual task
                 # entry after all admission/authorization awaits, not before
@@ -811,7 +836,13 @@ class Gateway:
                 return result
 
             result = await scope.run(
-                invoke_current(),
+                self._dispatch.run(
+                    invoke_current,
+                    background=False,
+                    deadline=deadline,
+                    clock=self._clock,
+                    after_wait=recheck_queued_authority,
+                ),
                 name=f"gateway:{capability_id}",
                 deadline_monotonic=deadline,
             )

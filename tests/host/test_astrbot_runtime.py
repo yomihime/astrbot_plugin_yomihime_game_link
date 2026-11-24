@@ -1267,6 +1267,35 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.calls, [])
         await terminate_and_drain(runtime)
 
+    async def test_chat_kind_reaches_ff14_from_verified_astrbot_commands(self):
+        runtime = self._runtime(_Context())
+        await runtime.initialize()
+        core = runtime.core_runtime
+        self.assertIs(core.jobs._dispatch, core.scheduler._dispatch)
+        self.assertIs(core.gateway._dispatch, core.jobs._dispatch)
+        handler = (
+            core.registry.snapshot().module("ff14/ff14").handlers.capabilities["status"]
+        )
+        original = handler.invoke
+        seen = []
+
+        async def capture(_, view, parameters):
+            seen.append(view.conversation_kind.value)
+            return await original(view, parameters)
+
+        try:
+            with patch.object(
+                type(handler), "invoke", autospec=True, side_effect=capture
+            ):
+                for kind in ("FriendMessage", "GroupMessage", "OtherMessage"):
+                    event = self._event(kind)
+                    event.platform = "webchat"
+                    event.conversation = f"chat-{kind}"
+                    await runtime.handle_event(event)
+            self.assertEqual(seen, ["direct", "group"])
+        finally:
+            await terminate_and_drain(runtime)
+
     async def test_trusted_commands_provision_one_adapter_scoped_principal(self):
         runtime = self._runtime(_Context())
         await runtime.initialize()

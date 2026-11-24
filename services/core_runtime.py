@@ -27,6 +27,7 @@ from ..core.contracts.administration import (
 )
 from ..core.contracts.subscriptions import CadenceConfiguration
 from ..core.contracts.validation_boundary import validate_contract
+from ..core.handler_dispatch import HandlerDispatch
 from ..core.health import HealthResolver
 from ..core.invocation import Gateway
 from ..core.lifecycle import LifecycleController
@@ -57,6 +58,7 @@ from ..infrastructure.sqlite.repositories_output import SQLiteRootOutputReposito
 from ..infrastructure.sqlite.repositories_runtime import SQLiteModuleRuntimeRepository
 from ..infrastructure.sync_diagnostics import SyncDiagnostics
 from ..yomihime_game_link_sdk.contexts import (
+    InvocationConversationKind,
     InvocationOrigin,
     InvocationView,
     MessageContext,
@@ -826,7 +828,9 @@ class CoreRuntime:
         )
         from .jobs import JobsService
 
+        handler_dispatch = HandlerDispatch()
         self.jobs = JobsService(
+            dispatch=handler_dispatch,
             database=database,
             registry=self.registry,
             issuer=self.issuer,
@@ -872,6 +876,7 @@ class CoreRuntime:
             )
 
         self.scheduler = SharedCollectionScheduler(
+            dispatch=handler_dispatch,
             diagnostics=self.sync_diagnostics,
             collector_timeouts=collector_timeouts,
             registry=self.registry,
@@ -952,6 +957,7 @@ class CoreRuntime:
         self.gateway = Gateway(
             self.registry,
             self.issuer,
+            dispatch=handler_dispatch,
             diagnostics=self.sync_diagnostics,
             admission=self.lifecycle.admission,
             lifecycle=self.lifecycle,
@@ -2061,6 +2067,11 @@ class CoreRuntime:
                 actor_id=ingress.actor_id,
                 conversation_id=ingress.conversation_id,
                 adapter_id=ingress.adapter_id,
+                conversation_kind=(
+                    InvocationConversationKind(ingress.conversation_kind.value)
+                    if origin is InvocationOrigin.COMMAND
+                    else None
+                ),
                 capability_id=capability_id,
                 deadline=deadline,
                 grant_id=(
