@@ -1127,10 +1127,15 @@ class SharedCollectionScheduler:
                 else:
                     previous = await self.repository.previous_observation(lease)
 
-                async def collect_current():
+                async def check_claim():
                     await self._require_current_execution(
                         candidate.key, principal, lease, scheduled_lease
                     )
+
+                await check_claim()
+
+                async def collect_current():
+                    self.admission.check(scheduled_lease)
                     handlers = self.lifecycle.handlers(module.module_id)
                     trace_event("collector_start")
                     return await handlers.collectors[schedule.collector_id].collect(
@@ -1143,6 +1148,7 @@ class SharedCollectionScheduler:
                         background=True,
                         deadline=deadline,
                         clock=self.monotonic_clock,
+                        after_wait=check_claim,
                     )
                 )
                 observation = await asyncio.wait_for(
