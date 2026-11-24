@@ -40,6 +40,7 @@ from ..core.contracts.subscriptions import (
 )
 from ..core.contracts.validation import _validate as _validate_schema
 from ..core.contracts.validation_boundary import validate_contract
+from ..core.handler_dispatch import HandlerDispatch
 from ..core.lifecycle import (
     ModuleDisabled,
     ModuleNotFound,
@@ -498,6 +499,7 @@ class SharedCollectionScheduler:
         background_config_for: Callable[[RegisteredModule], Awaitable[ConfigSnapshot]]
         | None = None,
         diagnostics: SyncDiagnostics | None = None,
+        dispatch: HandlerDispatch | None = None,
         collector_timeouts=None,
     ) -> None:
         validate_contract(binder_for)
@@ -512,6 +514,7 @@ class SharedCollectionScheduler:
         self.registry = registry
         self.issuer = issuer
         self.lifecycle = lifecycle
+        self._dispatch = dispatch or HandlerDispatch()
         self.admission = admission
         self.execution_claim_proofs = execution_claim_proofs
         self.binder_for = binder_for
@@ -1123,16 +1126,25 @@ class SharedCollectionScheduler:
                     )
                 else:
                     previous = await self.repository.previous_observation(lease)
-                await self._require_current_execution(
-                    candidate.key, principal, lease, scheduled_lease
-                )
-                handlers = self.lifecycle.handlers(module.module_id)
-                work = bound.tasks.await_result(
-                    handlers.collectors[schedule.collector_id].collect(
+
+                async def collect_current():
+                    await self._require_current_execution(
+                        candidate.key, principal, lease, scheduled_lease
+                    )
+                    handlers = self.lifecycle.handlers(module.module_id)
+                    trace_event("collector_start")
+                    return await handlers.collectors[schedule.collector_id].collect(
                         context, candidate.key.parameters, previous
                     )
+
+                work = bound.tasks.await_result(
+                    self._dispatch.run(
+                        collect_current,
+                        background=True,
+                        deadline=deadline,
+                        clock=self.monotonic_clock,
+                    )
                 )
-                trace_event("collector_start")
                 observation = await asyncio.wait_for(
                     work, timeout=max(0.0, deadline - self.monotonic_clock())
                 )

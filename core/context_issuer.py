@@ -234,9 +234,9 @@ class ContextIssuer:
             raise InvalidInvocation(
                 "Only subscription invocations may carry a delivery route"
             )
-        elif conversation_kind is not None:
+        elif conversation_kind is not None and origin is not InvocationOrigin.COMMAND:
             raise InvalidInvocation(
-                "Only subscription invocations may carry a conversation kind"
+                "Only command and subscription invocations may carry a conversation kind"
             )
         elif subscription_scope is not None:
             raise InvalidInvocation(

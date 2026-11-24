@@ -11,6 +11,8 @@
 
 模块在 `yomihime.manifest.json` 声明入口；工厂通过 `ModuleServices` 装配 handler。命令的 `operation_path`、参数模式、capability 和 schema 共同决定分派，`raw_tail` 的解释留给模块。工具参数直接进入能力，不拼接命令字符串；工具 owner 来自可信宿主事件。页面通过受限服务上下文调用能力，遵守 mount/update/dispose 和代际失效。帮助读取注册声明及健康投影，元数据读取不执行查询。
 
+Core 为聊天命令、工具、公共页面、采集和持久作业统一限制同时执行的顶层处理器数量，并为前台请求预留容量。排队消耗调用原本的超时预算，生命周期取消会撤销尚在排队的调用。模块继续使用原有处理器。可信聊天命令的 `InvocationView.conversation_kind` 来自宿主事件，取值为 `direct` 或 `group`。缺少该事实时按未知处理，模块不能据此推定私聊。
+
 磁盘声明包含 `package_id`、`contract_version`、局部 `module_id` 和 `factory_entry`，全局 owner 是 `package_id/module_id`。现有 FF14 的 `factory_entry="module:Factory"`；`ModuleFactory.create(ModuleServices)` 返回实现 `handlers/start/stop/check_health` 的实例，handlers 的 capabilities、collectors 和 evaluators 必须与声明精确一致。生产链经可信授权、不可变源码捕获、工厂解析、受限服务创建、生命周期接管后注册；测试直接调用 Registry 注册 fixture 不等于第二个生产包安装成功。
 
 | 维护对象 | 实际入口与检查位置 |
